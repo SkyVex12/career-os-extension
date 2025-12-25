@@ -1,4 +1,37 @@
 
+function isLikelyJobPage() {
+  const url = location.href;
+  if (/\/jobs\//i.test(url)) return true;
+  if (/greenhouse\.io\/.*\/jobs\//i.test(url)) return true;
+  if (/lever\.co\/.*\/(?:apply|jobs)/i.test(url)) return true;
+  if (/workday\.com/i.test(url)) return true;
+  const btn = Array.from(document.querySelectorAll("button,a")).find(el => {
+    const t = (el.textContent || "").trim().toLowerCase();
+    return t === "apply" || t.includes("apply now");
+  });
+  return !!btn;
+}
+
+async function addToHistory(item) {
+  const key = "careeros_history";
+  const existing = (await chrome.storage.local.get(key))[key] || [];
+  const next = [item, ...existing].slice(0, 50);
+  await chrome.storage.local.set({ [key]: next });
+}
+
+async function getHistory() {
+  const key = "careeros_history";
+  return ((await chrome.storage.local.get(key))[key]) || [];
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, (m) => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  }[m]));
+}
+
+const BACKEND_DEFAULT = "http://127.0.0.1:8000";
+
 async function populateUsers(root) {
   const sel = root.querySelector("#co_userId");
   if (!sel || sel.tagName.toLowerCase() !== "select") return;
@@ -70,10 +103,10 @@ async function populateUsers(root) {
     const root = document.createElement("div");
     root.id = PANEL_ID;
     root.innerHTML = `
-      <button class="co-btn" type="button">CareerOS</button>
+      <button class="co-launch" type="button" aria-label="Open CareerOS"><img class="co-launch-logo" src="${chrome.runtime.getURL(!isLikelyJobPage() ? "assets/closed-logo.png" : "assets/logo.png")}" alt="CareerOS"/></button>
       <div class="co-card" style="display:none;">
         <div class="co-head">
-          <div class="co-title">CareerOS • Generate Resume (DOCX)</div>
+          <div class="co-title"><img src="${chrome.runtime.getURL("assets/logo.png")}" alt="CareerOS" style="height:16px;width:auto;vertical-align:middle"/><span style="margin-left:8px;">Generate Resume (DOCX)</span></div>
           <button class="co-x" type="button" aria-label="Close">×</button>
         </div>
         <div class="co-body">
@@ -83,14 +116,8 @@ async function populateUsers(root) {
               <select id="co_userId" class="co-input"></select>
             </div>
             <div>
-              <label class="co-hidden">Token</label>
-              <input id="co_token" placeholder="EXTENSION_TOKEN" />
-            </div>
           </div>
-
-          <label class="co-hidden">Backend URL</label>
-          <input id="co_backend" placeholder="http://localhost:8000" />
-
+          </div>
           <label>Job URL</label>
           <input id="co_url" />
 
@@ -121,15 +148,13 @@ async function populateUsers(root) {
     // Attach to <html> instead of <body> to survive some frameworks replacing body content
     document.documentElement.appendChild(root);
 
-    const btn = root.querySelector(".co-btn");
+    const btn = root.querySelector(".co-launch");
     const card = root.querySelector(".co-card");
     const closeBtn = root.querySelector(".co-x");
     const statusEl = root.querySelector("#co_status");
 
     const els = {
       userId: root.querySelector("#co_userId"),
-      token: root.querySelector("#co_token"),
-      backend: root.querySelector("#co_backend"),
       url: root.querySelector("#co_url"),
       company: root.querySelector("#co_company"),
       position: root.querySelector("#co_position"),
@@ -142,26 +167,28 @@ async function populateUsers(root) {
     function closeCard() { card.style.display = "none"; }
 
     btn.addEventListener("click", () => {
-      if (card.style.display === "none") openCard(); else closeCard();
+     
+      if (card.style.display === "none") {
+         btn.innerHTML = `<img class="co-launch-logo" src="${chrome.runtime.getURL("assets/logo.png")}" />`;
+        openCard();
+      } else {
+         btn.innerHTML = `<img class="co-launch-logo" src="${chrome.runtime.getURL("assets/closed-logo.png")}" />`;
+        closeCard();
+      }
     });
     closeBtn.addEventListener("click", closeCard);
 
     els.url.value = location.href;
 
     async function loadSettings() {
-      const data = await chrome.storage.local.get(["userId","token","backend","company","position"]);
+      const data = await chrome.storage.local.get(["userId","company","position"]);
       els.userId.value = data.userId || "u1";
-      els.token.value = data.token || "";
-      els.backend.value = data.backend || "http://localhost:8000";
-      els.company.value = data.company || "";
+                  els.company.value = data.company || "";
       els.position.value = data.position || "";
     }
     async function saveSettings() {
       await chrome.storage.local.set({
-        userId: els.userId.value.trim(),
-        token: els.token.value.trim(),
-        backend: els.backend.value.trim(),
-        company: els.company.value.trim(),
+        userId: els.userId.value.trim(),company: els.company.value.trim(),
         position: els.position.value.trim(),
       });
     }
@@ -176,8 +203,8 @@ async function populateUsers(root) {
 
     ["change","blur"].forEach(ev => {
       els.userId.addEventListener(ev, saveSettings);
-      els.token.addEventListener(ev, saveSettings);
-      els.backend.addEventListener(ev, saveSettings);
+      els.token?.addEventListener(ev, saveSettings);
+      els.backend?.addEventListener(ev, saveSettings);
       els.company.addEventListener(ev, saveSettings);
       els.position.addEventListener(ev, saveSettings);
     });
@@ -266,4 +293,87 @@ if (!resp?.ok) {
 
   // Initial mount
   mountPanel();
+})();
+
+
+function renderHistory(panel) {
+  const host = panel.querySelector("#co_history");
+  if (!host) return;
+  getHistory().then(items => {
+    host.innerHTML = "";
+    if (!items.length) {
+      host.innerHTML = '<div class="co-muted">No history yet.</div>';
+      return;
+    }
+    items.slice(0, 10).forEach(it => {
+      const row = document.createElement("div");
+      row.className = "co-hrow";
+      const dt = it.created_at ? new Date(it.created_at).toLocaleString() : "";
+      row.innerHTML = `
+        <div class="co-hmeta">
+          <div class="co-htitle">${escapeHtml(it.company || "")} — ${escapeHtml(it.role || "")}</div>
+          <div class="co-hsub">${escapeHtml(it.stage || "")} • ${escapeHtml(dt)}</div>
+        </div>
+        <div class="co-hactions">
+          ${it.resume_download_url ? '<button class="co-btn co-small" data-dl="resume">Resume</button>' : ""}
+          ${it.cover_download_url ? '<button class="co-btn co-small" data-dl="cover">Cover</button>' : ""}
+        </div>
+      `;
+      row.querySelectorAll("button[data-dl]").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          const kind = btn.getAttribute("data-dl");
+          const url = kind === "resume" ? it.resume_download_url : it.cover_download_url;
+          const filename = (kind === "resume" ? "Resume" : "CoverLetter") + "_" + (it.company || "file").replace(/\W+/g,"_") + ".pdf";
+          const abs = url.startsWith("http") ? url : `http://127.0.0.1:8000` + url;
+          await chrome.runtime.sendMessage({
+            type: "DOWNLOAD_BLOB_URL",
+            payload: { url: abs, filename, saveAs: true },
+          });
+        });
+      });
+      host.appendChild(row);
+    });
+  });
+}
+
+(function careerosMount() {
+  try {
+    if (!isLikelyJobPage()) return;
+    if (document.getElementById("co_fab")) return;
+
+    const fab = document.createElement("div");
+    fab.id = "co_fab";
+    fab.className = "co-fab";
+    const img = document.createElement("img");
+    img.src = chrome.runtime.getURL("icons/icon48.png");
+    img.alt = "CareerOS";
+    fab.appendChild(img);
+
+    const panel = document.createElement("div");
+    panel.id = "co_panel";
+    panel.className = "co-panel";
+    panel.style.display = "none";
+    panel.innerHTML = `
+      <div class="co-header">
+        <div class="co-title"><img src="${chrome.runtime.getURL("icons/icon48.png")}"/><img src="${chrome.runtime.getURL("assets/logo.png")}" alt="CareerOS" style="height:18px;width:auto;display:block"/></div>
+        <button class="co-x" aria-label="Close">×</button>
+      </div>
+      <div class="co-body">
+        <div class="co-muted">Open/close. Your full form panel (if present) will also work.</div>
+        <div class="co-section">
+          <div style="font-weight:700;margin-bottom:6px">Recent</div>
+          <div id="co_history"></div>
+        </div>
+      </div>
+    `;
+    panel.querySelector(".co-x")?.addEventListener("click", () => { panel.style.display = "none"; });
+
+    fab.addEventListener("click", () => {
+      panel.style.display = (panel.style.display === "none") ? "block" : "none";
+      if (panel.style.display !== "none") renderHistory(panel);
+    });
+
+    document.body.appendChild(fab);
+    document.body.appendChild(panel);
+  } catch (e) {}
 })();

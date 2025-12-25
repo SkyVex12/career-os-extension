@@ -16,10 +16,7 @@
   "content_scripts": [
     {
       "matches": [
-        "http://*/*",
-        "https://*.greenhouse.io/*",
-        "https://*/*",
-        "https://job-boards.greenhouse.io/*"
+        "<all_urls>"
       ],
       "js": [
         "content.js"
@@ -43,5 +40,20 @@
       "48": "icons/icon48.png",
       "128": "icons/icon128.png"
     }
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "assets/logo.png",
+        "assets/closed-logo.png",
+        "icons/icon128.png",
+        "icons/icon16.png",
+        "icons/icon32.png",
+        "icons/icon48.png"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ]
 }
