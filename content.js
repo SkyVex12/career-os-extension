@@ -1,3 +1,4 @@
+const DEV_AUTH_TOKEN = "dev-admin";
 
 function canonicalizeUrl(input) {
   try {
@@ -20,8 +21,14 @@ function canonicalizeUrl(input) {
 
 async function checkAlreadyApplied(userId, url) {
   const norm = canonicalizeUrl(url);
+  if (userId === "__all__") {
+    const qsAny = new URLSearchParams({ url: norm }).toString();
+    const resAny = await fetch("http://127.0.0.1:8000/v1/applications/exists-any?" + qsAny, { headers: { "X-Auth-Token": DEV_AUTH_TOKEN } });
+    if (!resAny.ok) return null;
+    return await resAny.json();
+  }
   const qs = new URLSearchParams({ user_id: userId, url: norm }).toString();
-  const res = await fetch("http://127.0.0.1:8000/v1/applications/exists?" + qs);
+  const res = await fetch("http://127.0.0.1:8000/v1/applications/exists?" + qs, { headers: { "X-Auth-Token": DEV_AUTH_TOKEN } });
   if (!res.ok) return null;
   return await res.json();
 }
@@ -68,9 +75,10 @@ function applyAlreadyAppliedUI(rootEl, data) {
   // shake root once (subtle)
   if (rootEl) {
     rootEl.classList.remove("co-root-shake");
+    // force reflow so shake can replay
     void rootEl.offsetWidth;
     rootEl.classList.add("co-root-shake");
-    setTimeout(()=>rootEl.classList.remove("co-root-shake"), 900);
+    setTimeout(()=>rootEl.classList.remove("co-root-shake"), 1200);
   }
 }
 
@@ -112,11 +120,20 @@ async function populateUsers(root) {
   const sel = root.querySelector("#co_userId");
   if (!sel || sel.tagName.toLowerCase() !== "select") return;
   try {
-    const res = await fetch("http://127.0.0.1:8000/v1/users");
+    const res = await fetch("http://127.0.0.1:8000/v1/users", {
+      headers: { "X-Auth-Token": DEV_AUTH_TOKEN },
+    });
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
     const items = Array.isArray(data) ? data : (data.items || data.users || []);
     sel.innerHTML = "";
+
+    // Admin convenience: allow selecting all linked users (batch generate)
+    const optAll = document.createElement("option");
+    optAll.value = "__all__";
+    optAll.textContent = "All users";
+    sel.appendChild(optAll);
+
     items.forEach((u) => {
       const id = u.id || u.user_id || u;
       const name = u.name || "";
@@ -125,12 +142,12 @@ async function populateUsers(root) {
       opt.textContent = name ? `${name} (${id})` : String(id);
       sel.appendChild(opt);
     });
-    const saved = localStorage.getItem("careeros_user_id") || (items[0]?.id || items[0]?.user_id || "u1");
+    const saved = localStorage.getItem("careeros_user_id") || "__all__";
     sel.value = String(saved);
     sel.addEventListener("change", () => localStorage.setItem("careeros_user_id", sel.value));
   } catch (e) {
-    sel.innerHTML = '<option value="u1">u1</option>';
-    sel.value = localStorage.getItem("careeros_user_id") || "u1";
+    sel.innerHTML = '<option value="__all__">All users</option><option value="u1">u1</option>';
+    sel.value = localStorage.getItem("careeros_user_id") || "__all__";
   }
 }
 
@@ -226,12 +243,10 @@ async function populateUsers(root) {
               <label>User ID</label>
               <select id="co_userId" class="co-input"></select>
             </div>
-
-            <div class="co-exists-slot">
-              <div id="co_exists_hint" class="co-exists-hint" style="display:none;"></div>
-            </div>
+            <div>
+</div>
           </div>
-          <label>Job URL</label>
+<label>Job URL</label>
           <input id="co_url" />
 
           <label>Company</label>
@@ -274,6 +289,8 @@ async function populateUsers(root) {
       jd: root.querySelector("#co_jd"),
       generate: root.querySelector("#co_generate"),
     };
+
+    populateUsers(root).catch(()=>{});
 
     function setStatus(msg) { statusEl.textContent = msg; }
     function openCard() { card.style.display = "block"; }
@@ -368,13 +385,19 @@ async function populateUsers(root) {
       await saveSettings();
 
       try {
-        const res = await fetch(`${backend}/v1/ingest/apply-and-generate`, {
+        const endpoint = (userId === "__all__") ? `${backend}/v1/ingest/apply-and-generate/batch` : `${backend}/v1/ingest/apply-and-generate`;
+        const res = await fetch(endpoint, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "X-Extension-Token": token,
+            "X-Auth-Token": (token || DEV_AUTH_TOKEN),
           },
-          body: JSON.stringify({
+          body: JSON.stringify(userId === "__all__" ? {
+            url: jobUrl,
+            company,
+            position,
+            jd_text: jdText,
+          } : {
             user_id: userId,
             url: jobUrl,
             company,
@@ -390,14 +413,34 @@ async function populateUsers(root) {
         }
 
         const mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        if (Array.isArray(data.results)) {
+          // Admin batch: download one docx per user
+          const okOnes = data.results.filter(r => r && r.ok);
+          if (!okOnes.length) {
+            setStatus(`Batch finished, but nothing generated.` + JSON.stringify(data.results, null, 2));
+            return;
+          }
+          let okCount = 0;
+          for (const r of okOnes) {
+            if (!r.resume_docx_base64) continue;
+            const docxUrl = b64ToBlobUrl(r.resume_docx_base64, mime);
+            const filename = `CareerOS/${r.user_id}/${r.application_id}/resume.docx`;
+            const resp = await chrome.runtime.sendMessage({
+              type: "DOWNLOAD_BLOB_URL",
+              payload: { url: docxUrl, filename, saveAs: true },
+            });
+            if (resp?.ok) okCount++;
+          }
+          setStatus(`✅ Batch generated for ${okCount}/${okOnes.length} users.`);
+          return;
+        }
         if (!data.resume_docx_base64) {
   setStatus(`Backend response missing resume_docx_base64.\nRe-download: ${backend}${data.resume_download_url || ""}`);
   return;
 }
 const docxUrl = b64ToBlobUrl(data.resume_docx_base64, mime);
-
-        const filename = `CareerOS/${userId}/${data.application_id}/resume.docx`;
-        const resp = await chrome.runtime.sendMessage({
+const filename = `CareerOS/${userId}/${data.application_id}/resume.docx`;
+const resp = await chrome.runtime.sendMessage({
   type: "DOWNLOAD_BLOB_URL",
   payload: { url: docxUrl, filename, saveAs: true },
 });
