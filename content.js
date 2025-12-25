@@ -1,4 +1,31 @@
 
+async function populateUsers(root) {
+  const sel = root.querySelector("#co_userId");
+  if (!sel || sel.tagName.toLowerCase() !== "select") return;
+  try {
+    const res = await fetch("http://127.0.0.1:8000/v1/users");
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    const items = Array.isArray(data) ? data : (data.items || data.users || []);
+    sel.innerHTML = "";
+    items.forEach((u) => {
+      const id = u.id || u.user_id || u;
+      const name = u.name || "";
+      const opt = document.createElement("option");
+      opt.value = String(id);
+      opt.textContent = name ? `${name} (${id})` : String(id);
+      sel.appendChild(opt);
+    });
+    const saved = localStorage.getItem("careeros_user_id") || (items[0]?.id || items[0]?.user_id || "u1");
+    sel.value = String(saved);
+    sel.addEventListener("change", () => localStorage.setItem("careeros_user_id", sel.value));
+  } catch (e) {
+    sel.innerHTML = '<option value="u1">u1</option>';
+    sel.value = localStorage.getItem("careeros_user_id") || "u1";
+  }
+}
+
+
 (() => {
   const PANEL_ID = "careeros-panel-root";
   const STYLE_ID = "careeros-panel-style";
@@ -53,15 +80,15 @@
           <div class="co-row">
             <div>
               <label>User ID</label>
-              <input id="co_userId" placeholder="e.g. u1" />
+              <select id="co_userId" class="co-input"></select>
             </div>
             <div>
-              <label>Token</label>
+              <label class="co-hidden">Token</label>
               <input id="co_token" placeholder="EXTENSION_TOKEN" />
             </div>
           </div>
 
-          <label>Backend URL</label>
+          <label class="co-hidden">Backend URL</label>
           <input id="co_backend" placeholder="http://localhost:8000" />
 
           <label>Job URL</label>
@@ -157,14 +184,14 @@
 
     els.generate.addEventListener("click", async () => {
       const userId = els.userId.value.trim();
-      const token = els.token.value.trim();
-      const backend = els.backend.value.trim().replace(/\/$/, "");
+      const token = "";
+      const backend = "http://127.0.0.1:8000";
       const jobUrl = els.url.value.trim();
       const company = els.company.value.trim();
       const position = els.position.value.trim();
       const jdText = els.jd.value.trim();
 
-      if (!userId || !token || !backend || !jobUrl || !company || !position || jdText.length < 50) {
+      if (!userId || !backend || !jobUrl || !company || !position || jdText.length < 50) {
         setStatus("Missing fields. JD must be at least ~50 chars.");
         return;
       }
@@ -195,10 +222,21 @@
         }
 
         const mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-        const docxUrl = b64ToBlobUrl(data.resume_docx_base64, mime);
+        if (!data.resume_docx_base64) {
+  setStatus(`Backend response missing resume_docx_base64.\nRe-download: ${backend}${data.resume_download_url || ""}`);
+  return;
+}
+const docxUrl = b64ToBlobUrl(data.resume_docx_base64, mime);
 
         const filename = `CareerOS/${userId}/${data.application_id}/resume.docx`;
-        chrome.downloads.download({ url: docxUrl, filename, saveAs: true });
+        const resp = await chrome.runtime.sendMessage({
+  type: "DOWNLOAD_BLOB_URL",
+  payload: { url: docxUrl, filename, saveAs: true },
+});
+if (!resp?.ok) {
+  setStatus(`✅ Generated, but download failed:\n${resp?.error || "Unknown error"}\nRe-download: ${backend}${data.resume_download_url || ""}`);
+  return;
+}
 
         await chrome.storage.local.set({
           lastFileId: data.resume_docx_file_id,
