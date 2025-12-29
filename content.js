@@ -14,6 +14,11 @@
 //      and reflow to replay. This is the most reliable.
 //    - We also include keyframes and ensure no conflicting transforms.
 //
+// ✅ NEW FEATURES (requested):
+// 3) Add "Source site" (human input like "indeed") and send to backend.
+// 4) Reduce cost: Extract JD keys once (cached server-side) via /v1/jd/keys,
+//    then pass jd_keys into /v1/ingest/apply-and-generate.
+//
 // Behavior:
 // - Select users (chips + checklist). "All users" selects all.
 // - URL blur or selection changes -> per-user /v1/applications/exists checks.
@@ -462,7 +467,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       #${PANEL_ID} .co-x { border:0; background: transparent; cursor:pointer; font-size: 18px; line-height: 1; padding: 2px 6px; }
       #${PANEL_ID} .co-body { padding: 10px 12px; }
       #${PANEL_ID} label { display:block; font-size: 12px; margin-top: 8px; color:#111; font-weight:900; }
-      #${PANEL_ID} input, #${PANEL_ID} textarea {
+      #${PANEL_ID} input, #${PANEL_ID} textarea, #${PANEL_ID} select {
         width:100%; box-sizing:border-box; margin-top: 4px; padding: 10px; border-radius: 12px;
         border: 1px solid #e5e7eb; font-size: 12px;
       }
@@ -620,6 +625,9 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
               <div class="co-muted" style="margin-top:6px;">Applied hint is on the right of the user ID line. Hover user id to see full id.</div>
             </div>
 
+            <label>Source site</label>
+            <input id="co_source_site" placeholder="indeed" />
+
             <label>Job URL</label>
             <input id="co_url" />
             <label>Company</label>
@@ -670,6 +678,8 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       email: root.querySelector("#co_email"),
       password: root.querySelector("#co_password"),
       login: root.querySelector("#co_login"),
+
+      source_site: root.querySelector("#co_source_site"),
 
       url: root.querySelector("#co_url"),
       company: root.querySelector("#co_company"),
@@ -753,11 +763,13 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       await chrome.storage.local.set({
         company: els.company.value.trim(),
         position: els.position.value.trim(),
+        source_site: els.source_site.value.trim(),
       });
     }
     ["change", "blur"].forEach((ev) => {
       els.company.addEventListener(ev, saveAppSettings);
       els.position.addEventListener(ev, saveAppSettings);
+      els.source_site.addEventListener(ev, saveAppSettings);
     });
 
     // URL blur triggers re-check
@@ -864,6 +876,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       const company = (els.company.value || "").trim();
       const position = (els.position.value || "").trim();
       const jdText = (els.jd.value || "").trim();
+      const sourceSite = (els.source_site.value || "").trim();
 
       if (
         !selected.length ||
@@ -876,11 +889,37 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         return;
       }
 
-      setStatus("Sending to backend...");
+      setStatus("Preparing JD keys (cache-aware)...");
       await saveAppSettings();
 
       const mime =
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+      // ✅ Extract JD keys once (server can cache by url/text hash)
+      let jd_keys = null;
+      try {
+        const normUrl = canonicalizeUrl(jobUrl);
+        const keysResp = await apiCall("/v1/jd/keys", {
+          method: "POST",
+          json: {
+            source_url: normUrl,
+            jd_text: jdText,
+            scope: "fragment",
+          },
+        });
+        if (keysResp.ok) {
+          jd_keys =
+            keysResp.data?.keys ||
+            keysResp.data?.keys_json ||
+            keysResp.data?.jd_keys ||
+            null;
+        } else {
+          // Not fatal. We'll still send jd_text to apply-and-generate.
+          jd_keys = null;
+        }
+      } catch {
+        jd_keys = null;
+      }
 
       try {
         let okCount = 0;
@@ -899,7 +938,9 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
               url: jobUrl,
               company,
               position,
-              jd_text: jdText,
+              source_site: sourceSite, // ✅ new
+              jd_keys, // ✅ new (preferred by backend if supported)
+              jd_text: jdText, // keep for backward compatibility
             },
           });
 
@@ -954,11 +995,13 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         "principal",
         "company",
         "position",
+        "source_site",
       ]);
 
       els.backend.value = data.backend || BACKEND_DEFAULT;
       els.company.value = data.company || "";
       els.position.value = data.position || "";
+      els.source_site.value = data.source_site || "";
       els.url.value = location.href;
 
       await pushAuthToBackground({
