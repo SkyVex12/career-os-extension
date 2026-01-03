@@ -892,32 +892,6 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       const mime =
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
-      // ✅ Extract JD keys once (server can cache by url/text hash)
-      let jd_keys = null;
-      try {
-        const normUrl = canonicalizeUrl(jobUrl);
-        const keysResp = await apiCall("/v1/jd/keys", {
-          method: "POST",
-          json: {
-            source_url: normUrl,
-            jd_text: jdText,
-            scope: "fragment",
-          },
-        });
-        if (keysResp.ok) {
-          jd_keys =
-            keysResp.data?.keys ||
-            keysResp.data?.keys_json ||
-            keysResp.data?.jd_keys ||
-            null;
-        } else {
-          // Not fatal. We'll still send jd_text to apply-and-generate.
-          jd_keys = null;
-        }
-      } catch {
-        jd_keys = null;
-      }
-
       try {
         let okCount = 0;
         const failures = [];
@@ -936,7 +910,6 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
               company,
               position,
               source_site: sourceSite, // ✅ new
-              jd_keys, // ✅ new (preferred by backend if supported)
               jd_text: jdText, // keep for backward compatibility
             },
           });
@@ -980,6 +953,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
 
         await refreshExistsInList(root, card, els.url);
       } catch (e) {
+        console.log(e);
         setStatus(`Request failed:\n${String(e)}`);
       }
     });
