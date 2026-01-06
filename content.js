@@ -394,7 +394,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       const uid = String(selected[idx++]);
       try {
         const r = await apiCall("/v1/applications/exists", {
-          query: { user_id: uid, url: norm },
+          query: { user_id: uid, url: url },
         });
         if (!r.ok) continue;
 
