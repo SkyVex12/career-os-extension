@@ -58,7 +58,7 @@ function escapeHtml(str) {
         ">": "&gt;",
         '"': "&quot;",
         "'": "&#39;",
-      }[m])
+      })[m],
   );
 }
 
@@ -252,7 +252,7 @@ async function setupUserPicker(root) {
       const chip = document.createElement("div");
       chip.className = "co-chip";
       chip.innerHTML = `${escapeHtml(
-        label
+        label,
       )} <button class="co-chip-x" type="button" aria-label="Remove">×</button>`;
       chip
         .querySelector(".co-chip-x")
@@ -270,7 +270,7 @@ async function setupUserPicker(root) {
       : CO_ALL_USERS.filter(
           (u) =>
             (u.name || "").toLowerCase().includes(q) ||
-            String(u.id).toLowerCase().includes(q)
+            String(u.id).toLowerCase().includes(q),
         );
 
     listEl.innerHTML = "";
@@ -301,14 +301,14 @@ async function setupUserPicker(root) {
         <div class="co-user-left">
           <div class="co-user-name">${escapeHtml(u.name || id)}</div>
           <div class="co-user-id" title="${escapeHtml(id)}">${escapeHtml(
-        id
-      )}</div>
+            id,
+          )}</div>
         </div>
         <div class="co-user-right-slot">
           ${
             appliedText
               ? `<div class="co-user-badge" title="${escapeHtml(
-                  appliedText
+                  appliedText,
                 )}">${escapeHtml(appliedText)}</div>`
               : ``
           }
@@ -414,13 +414,13 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
 
   await Promise.all(
     Array.from({ length: Math.min(CONCURRENCY, selected.length) }, () =>
-      worker()
-    )
+      worker(),
+    ),
   );
 
   // ✅ shake the FULL panel if ANY applied exists
   const anyApplied = selected.some(
-    (uid) => CO_EXISTS_CACHE.get(String(uid))?.exists
+    (uid) => CO_EXISTS_CACHE.get(String(uid))?.exists,
   );
   if (anyApplied) shakePanel(cardEl);
 }
@@ -447,7 +447,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
     "job posting",
   ];
   const looksLikeJobPage = jobHints.some(
-    (h) => url.includes(h) || title.includes(h)
+    (h) => url.includes(h) || title.includes(h),
   );
 
   function ensureStyles() {
@@ -455,9 +455,9 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
     const style = document.createElement("style");
     style.id = STYLE_ID;
     style.textContent = `
-      #${PANEL_ID} { position: fixed; right: 16px; bottom: 16px; z-index: 2147483647; font-family: Arial, sans-serif; }
+      #${PANEL_ID} { position: fixed; right: 16px; bottom: 10vh; z-index: 2147483647; font-family: Arial, sans-serif; }
       #${PANEL_ID} .co-launch { border:0; background:transparent; padding:0; cursor:pointer; }
-      #${PANEL_ID} .co-launch-logo { height: 54px; width: 108px; display:block; }
+      #${PANEL_ID} .co-launch-logo { height: 50px; width: 90px; display:block; }
       #${PANEL_ID} .co-card { width: 430px; max-height: 75vh; overflow: auto; margin-top: 10px;
         border-radius: 14px; background: #fff; box-shadow: 0 10px 30px rgba(0,0,0,.25);
         border: 1px solid rgba(0,0,0,.08); transform: translateZ(0); }
@@ -581,7 +581,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
     root.innerHTML = `
       <button class="co-launch" type="button" aria-label="Open CareerOS">
         <img class="co-launch-logo" src="${chrome.runtime.getURL(
-          !isLikelyJobPage() ? "assets/closed-logo.png" : "assets/logo.png"
+          !isLikelyJobPage() ? "assets/closed-logo.png" : "assets/logo.png",
         )}" alt="CareerOS"/>
       </button>
 
@@ -589,7 +589,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         <div class="co-head">
           <div class="co-title">
             <img src="${chrome.runtime.getURL(
-              "assets/logo.png"
+              "assets/logo.png",
             )}" alt="CareerOS" style="height:16px;width:auto;vertical-align:middle"/>
             <span>CareerOS</span>
             <span id="co_auth_pill" class="co-pill" style="display:none;"></span>
@@ -738,12 +738,12 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
     btn.addEventListener("click", () => {
       if (card.style.display === "none") {
         btn.innerHTML = `<img class="co-launch-logo" src="${chrome.runtime.getURL(
-          "assets/logo.png"
+          "assets/logo.png",
         )}" />`;
         openCard();
       } else {
         btn.innerHTML = `<img class="co-launch-logo" src="${chrome.runtime.getURL(
-          "assets/closed-logo.png"
+          "assets/closed-logo.png",
         )}" />`;
         closeCard();
       }
@@ -816,7 +816,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
 
         if (!r.ok) {
           setAuthStatus(
-            `Login failed (${r.status}):\n${JSON.stringify(r.data, null, 2)}`
+            `Login failed (${r.status}):\n${JSON.stringify(r.data, null, 2)}`,
           );
           return;
         }
@@ -843,14 +843,14 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
           clearTimeout(root.__coCheckTimer);
           root.__coCheckTimer = setTimeout(
             () => refreshExistsInList(root, card, els.url).catch(() => {}),
-            180
+            180,
           );
         });
         root.querySelector("#co_user_search")?.addEventListener("input", () => {
           clearTimeout(root.__coCheckTimer);
           root.__coCheckTimer = setTimeout(
             () => refreshExistsInList(root, card, els.url).catch(() => {}),
-            260
+            260,
           );
         });
 
@@ -879,7 +879,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         CO_EXISTS_CACHE.clear();
         showAuth(null);
         setAuthStatus(
-          `Logged out locally. (Error calling backend: ${String(e)})`
+          `Logged out locally. (Error calling backend: ${String(e)})`,
         );
         setStatus("");
       }
@@ -919,7 +919,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         for (const uid of selected) {
           const name = CO_USER_MAP.get(String(uid))?.name || String(uid);
           setStatus(
-            `Generating for ${name}... (${okCount}/${selected.length})`
+            `Generating for ${name}... (${okCount}/${selected.length})`,
           );
 
           const r = await apiCall("/v1/ingest/apply-and-generate", {
@@ -987,13 +987,13 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
               if (pdfUrlAbs) {
                 downloaded = await downloadHttpUrl(
                   pdfUrlAbs,
-                  `${baseFolder}/resume.pdf`
+                  `${baseFolder}/resume.pdf`,
                 );
               } else if (docxUrlAbs) {
                 // fallback
                 downloaded = await downloadHttpUrl(
                   docxUrlAbs,
-                  `${baseFolder}/resume.docx`
+                  `${baseFolder}/resume.docx`,
                 );
               }
             } else if (resumeFormat === "both") {
@@ -1002,12 +1002,12 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
               if (docxUrlAbs)
                 ok1 = await downloadHttpUrl(
                   docxUrlAbs,
-                  `${baseFolder}/resume.docx`
+                  `${baseFolder}/resume.docx`,
                 );
               if (pdfUrlAbs)
                 ok2 = await downloadHttpUrl(
                   pdfUrlAbs,
-                  `${baseFolder}/resume.pdf`
+                  `${baseFolder}/resume.pdf`,
                 );
               downloaded = ok1 || ok2;
             } else {
@@ -1015,13 +1015,13 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
               if (docxUrlAbs) {
                 downloaded = await downloadHttpUrl(
                   docxUrlAbs,
-                  `${baseFolder}/resume.docx`
+                  `${baseFolder}/resume.docx`,
                 );
               } else if (pdfUrlAbs) {
                 // fallback
                 downloaded = await downloadHttpUrl(
                   pdfUrlAbs,
-                  `${baseFolder}/resume.pdf`
+                  `${baseFolder}/resume.pdf`,
                 );
               }
             }
@@ -1067,11 +1067,11 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
 
         if (failures.length) {
           setStatus(
-            `✅ Done. Generated for ${okCount}/${selected.length} users.\nFailed: ${failures.length}`
+            `✅ Done. Generated for ${okCount}/${selected.length} users.\nFailed: ${failures.length}`,
           );
         } else {
           setStatus(
-            `✅ Done. Generated for ${okCount}/${selected.length} users.`
+            `✅ Done. Generated for ${okCount}/${selected.length} users.`,
           );
         }
 
@@ -1120,14 +1120,14 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
           clearTimeout(root.__coCheckTimer);
           root.__coCheckTimer = setTimeout(
             () => refreshExistsInList(root, card, els.url).catch(() => {}),
-            180
+            180,
           );
         });
         root.querySelector("#co_user_search")?.addEventListener("input", () => {
           clearTimeout(root.__coCheckTimer);
           root.__coCheckTimer = setTimeout(
             () => refreshExistsInList(root, card, els.url).catch(() => {}),
-            260
+            260,
           );
         });
 
@@ -1137,7 +1137,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       if (looksLikeJobPage) {
         card.style.display = "block";
         btn.innerHTML = `<img class="co-launch-logo" src="${chrome.runtime.getURL(
-          "assets/logo.png"
+          "assets/logo.png",
         )}" />`;
       }
     })().catch(() => {});
