@@ -874,7 +874,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
             .trim()
             .replace(/\/$/, "");
           const appId = data.application_id || data.applicationId || "";
-          const baseFolder = `CareerOS/${uid}/${appId || "application"}`;
+          const resumeFolder = `CareerOS/${uid}/${appId}`;
 
           async function downloadHttpUrl(url, filename) {
             const resp = await chrome.runtime.sendMessage({
@@ -915,12 +915,12 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
               if (pdfUrlAbs) {
                 downloaded = await downloadHttpUrl(
                   pdfUrlAbs,
-                  `${baseFolder}/resume.pdf`,
+                  `${resumeFolder}/resume.pdf`,
                 );
               } else if (docxUrlAbs) {
                 downloaded = await downloadHttpUrl(
                   docxUrlAbs,
-                  `${baseFolder}/resume.docx`,
+                  `${resumeFolder}/resume.docx`,
                 );
               }
             } else if (resumeFormat === "both") {
@@ -929,24 +929,24 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
               if (docxUrlAbs)
                 ok1 = await downloadHttpUrl(
                   docxUrlAbs,
-                  `${baseFolder}/resume.docx`,
+                  `${resumeFolder}/resume.docx`,
                 );
               if (pdfUrlAbs)
                 ok2 = await downloadHttpUrl(
                   pdfUrlAbs,
-                  `${baseFolder}/resume.pdf`,
+                  `${resumeFolder}/resume.pdf`,
                 );
               downloaded = ok1 || ok2;
             } else {
               if (docxUrlAbs) {
                 downloaded = await downloadHttpUrl(
                   docxUrlAbs,
-                  `${baseFolder}/resume.docx`,
+                  `${resumeFolder}/resume.docx`,
                 );
               } else if (pdfUrlAbs) {
                 downloaded = await downloadHttpUrl(
                   pdfUrlAbs,
-                  `${baseFolder}/resume.pdf`,
+                  `${resumeFolder}/resume.pdf`,
                 );
               }
             }
@@ -969,7 +969,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
                   /[<>:"/\\|?*]/g,
                   "_",
                 );
-                const clName = `${baseFolder}/Cover_Letter_${companySafe}_${positionSafe}.docx`;
+                const clName = `${resumeFolder}/Cover_Letter.docx`;
 
                 const resp = await chrome.runtime.sendMessage({
                   type: "CO_DOWNLOAD_COVER_LETTER_DOCX",
@@ -982,7 +982,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
                   const clUrl = URL.createObjectURL(clBlob);
                   await downloadHttpUrl(
                     clUrl,
-                    `${baseFolder}/cover_letter.txt`,
+                    `${resumeFolder}/cover_letter.txt`,
                   );
                   setTimeout(() => URL.revokeObjectURL(clUrl), 30_000);
                 }
@@ -995,7 +995,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
 
           if (data.resume_docx_base64) {
             const docxUrl = b64ToBlobUrl(data.resume_docx_base64, mime);
-            const filename = `${baseFolder}/resume.docx`;
+            const filename = `${resumeFolder}/resume.docx`;
 
             const ok = await downloadHttpUrl(docxUrl, filename);
             if (!ok) {

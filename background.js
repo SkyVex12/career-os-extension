@@ -220,6 +220,48 @@ function sanitizeFilename(name) {
     .trim();
 }
 
+// Wait for a download to complete (or fail).
+// NOTE: chrome.downloads.download() returns immediately after queuing.
+// Without waiting, the UI can appear to download all resumes first and then
+// all cover letters. This makes downloads truly per-user in sequence.
+function waitForDownloadComplete(downloadId, timeoutMs = 120000) {
+  return new Promise((resolve) => {
+    if (!downloadId) return resolve({ ok: false, error: "Missing downloadId" });
+
+    let done = false;
+    const finish = (result) => {
+      if (done) return;
+      done = true;
+      try {
+        chrome.downloads.onChanged.removeListener(onChanged);
+      } catch (_) {}
+      clearTimeout(timer);
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => {
+      finish({ ok: false, error: "Download timed out" });
+    }, timeoutMs);
+
+    const onChanged = (delta) => {
+      if (!delta || delta.id !== downloadId) return;
+      if (delta.error && delta.error.current) {
+        finish({ ok: false, error: delta.error.current });
+        return;
+      }
+      if (delta.state && delta.state.current) {
+        if (delta.state.current === "complete") {
+          finish({ ok: true });
+        } else if (delta.state.current === "interrupted") {
+          finish({ ok: false, error: "interrupted" });
+        }
+      }
+    };
+
+    chrome.downloads.onChanged.addListener(onChanged);
+  });
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     try {
@@ -303,14 +345,36 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return;
         }
 
-        chrome.downloads.download(
-          { url, filename, saveAs: !!saveAs },
-          (downloadId) => {
-            const err = chrome.runtime.lastError;
-            if (err) sendResponse({ ok: false, error: err.message });
-            else sendResponse({ ok: true, downloadId });
-          },
-        );
+        const downloadId = await new Promise((resolve) => {
+          chrome.downloads.download(
+            { url, filename, saveAs: !!saveAs },
+            (id) => {
+              const err = chrome.runtime.lastError;
+              if (err) resolve({ error: err.message });
+              else resolve({ id });
+            },
+          );
+        });
+
+        if (!downloadId || downloadId.error) {
+          sendResponse({
+            ok: false,
+            error: downloadId?.error || "Download failed",
+          });
+          return;
+        }
+
+        const waited = await waitForDownloadComplete(downloadId.id);
+        if (!waited.ok) {
+          sendResponse({
+            ok: false,
+            error: waited.error || "Download failed",
+            downloadId: downloadId.id,
+          });
+          return;
+        }
+
+        sendResponse({ ok: true, downloadId: downloadId.id });
         return;
       }
 
@@ -329,16 +393,38 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
         const dataUrl = `data:${mime};base64,${b64}`;
 
-        const safeName = sanitizeFilename(filename || "cover_letter.docx");
+        const safeName = filename || "cover_letter.docx";
 
-        chrome.downloads.download(
-          { url: dataUrl, filename: safeName, saveAs: !!saveAs },
-          (downloadId) => {
-            const err = chrome.runtime.lastError;
-            if (err) sendResponse({ ok: false, error: err.message });
-            else sendResponse({ ok: true, downloadId });
-          },
-        );
+        const created = await new Promise((resolve) => {
+          chrome.downloads.download(
+            { url: dataUrl, filename: safeName, saveAs: !!saveAs },
+            (id) => {
+              const err = chrome.runtime.lastError;
+              if (err) resolve({ error: err.message });
+              else resolve({ id });
+            },
+          );
+        });
+
+        if (!created || created.error) {
+          sendResponse({
+            ok: false,
+            error: created?.error || "Download failed",
+          });
+          return;
+        }
+
+        const waited = await waitForDownloadComplete(created.id);
+        if (!waited.ok) {
+          sendResponse({
+            ok: false,
+            error: waited.error || "Download failed",
+            downloadId: created.id,
+          });
+          return;
+        }
+
+        sendResponse({ ok: true, downloadId: created.id });
         return;
       }
 
