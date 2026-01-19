@@ -1,29 +1,5 @@
 // content.js
 // CareerOS content script with login/logout + user picker.
-//
-// ✅ FIXES per your request:
-// 1) Username must ALWAYS be visible (never covered).
-//    - Left block (name + id) has its own column and truncates nicely.
-//    - Right "Applied..." badge is in a separate column (never overlaps name).
-//    - Badge is anchored to the RIGHT of the USER ID line (not the name line).
-//    - Badge may visually cover the ID line area, BUT:
-//        - Full user id is available on hover (title tooltip) on the id line.
-//        - Badge itself also has a title tooltip.
-// 2) Shaking the FULL panel must work.
-//    - We add a shake class to the CARD element (.co-card) not root,
-//      and reflow to replay. This is the most reliable.
-//    - We also include keyframes and ensure no conflicting transforms.
-//    - Shake is triggered when ANY selected user has an existing application.
-// 3) Add "Source site" (human input like "indeed") and send to backend.
-// 4) Reduce cost: Extract JD keys once (cached server-side) via /v1/jd/keys,
-//    then pass jd_keys into /v1/ingest/apply-and-generate.
-//
-// Behavior:
-// - Select users (chips + checklist). "All users" selects all.
-// - URL blur or selection changes -> per-user /v1/applications/exists checks.
-// - Right badge shows: "Applied • 12/26/2025 • by TimothyTran"
-// - Press Enter on email/password triggers Login.
-
 const BACKEND_DEFAULT = "https://career-os.onrender.com";
 
 let CO_USER_MAP = new Map(); // user_id -> { id, name }
@@ -58,7 +34,7 @@ function escapeHtml(str) {
         ">": "&gt;",
         '"': "&quot;",
         "'": "&#39;",
-      }[m])
+      })[m],
   );
 }
 
@@ -163,7 +139,6 @@ async function ensureLoggedIn() {
 function shakePanel(cardEl) {
   if (!cardEl) return;
   cardEl.classList.remove("co-card-shake");
-  // force reflow so animation restarts
   void cardEl.offsetWidth;
   cardEl.classList.add("co-card-shake");
   setTimeout(() => cardEl.classList.remove("co-card-shake"), 900);
@@ -252,7 +227,7 @@ async function setupUserPicker(root) {
       const chip = document.createElement("div");
       chip.className = "co-chip";
       chip.innerHTML = `${escapeHtml(
-        label
+        label,
       )} <button class="co-chip-x" type="button" aria-label="Remove">×</button>`;
       chip
         .querySelector(".co-chip-x")
@@ -261,8 +236,6 @@ async function setupUserPicker(root) {
     });
   }
 
-  // ✅ IMPORTANT: username and id are in their own column.
-  // Badge is a separate right column, aligned with the ID line (2nd line).
   function renderList() {
     const q = (searchEl.value || "").trim().toLowerCase();
     const filtered = !q
@@ -270,7 +243,7 @@ async function setupUserPicker(root) {
       : CO_ALL_USERS.filter(
           (u) =>
             (u.name || "").toLowerCase().includes(q) ||
-            String(u.id).toLowerCase().includes(q)
+            String(u.id).toLowerCase().includes(q),
         );
 
     listEl.innerHTML = "";
@@ -301,14 +274,14 @@ async function setupUserPicker(root) {
         <div class="co-user-left">
           <div class="co-user-name">${escapeHtml(u.name || id)}</div>
           <div class="co-user-id" title="${escapeHtml(id)}">${escapeHtml(
-        id
-      )}</div>
+            id,
+          )}</div>
         </div>
         <div class="co-user-right-slot">
           ${
             appliedText
               ? `<div class="co-user-badge" title="${escapeHtml(
-                  appliedText
+                  appliedText,
                 )}">${escapeHtml(appliedText)}</div>`
               : ``
           }
@@ -333,7 +306,6 @@ async function setupUserPicker(root) {
     renderList();
   }
 
-  // fetch users
   try {
     const r = await apiCall("/v1/users");
     if (!r.ok) throw new Error("Failed to load users");
@@ -352,7 +324,6 @@ async function setupUserPicker(root) {
 
     if (allMode) selected = new Set(CO_ALL_USERS.map((x) => String(x.id)));
 
-    // default: all users
     if (!allMode && selected.size === 0) {
       allMode = true;
       selected = new Set(CO_ALL_USERS.map((x) => String(x.id)));
@@ -385,7 +356,6 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
 
   const norm = canonicalizeUrl(url);
 
-  // concurrency limit
   const CONCURRENCY = 6;
   let idx = 0;
 
@@ -405,7 +375,6 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
 
         CO_EXISTS_CACHE.set(uid, { exists, created_at, created_by, raw: data });
       } catch {
-        // ignore
       } finally {
         root.__coRenderUserList?.();
       }
@@ -414,13 +383,12 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
 
   await Promise.all(
     Array.from({ length: Math.min(CONCURRENCY, selected.length) }, () =>
-      worker()
-    )
+      worker(),
+    ),
   );
 
-  // ✅ shake the FULL panel if ANY applied exists
   const anyApplied = selected.some(
-    (uid) => CO_EXISTS_CACHE.get(String(uid))?.exists
+    (uid) => CO_EXISTS_CACHE.get(String(uid))?.exists,
   );
   if (anyApplied) shakePanel(cardEl);
 }
@@ -447,7 +415,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
     "job posting",
   ];
   const looksLikeJobPage = jobHints.some(
-    (h) => url.includes(h) || title.includes(h)
+    (h) => url.includes(h) || title.includes(h),
   );
 
   function ensureStyles() {
@@ -520,45 +488,12 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       #${PANEL_ID} .co-user-row:last-child{ border-bottom:0; }
       #${PANEL_ID} .co-user-checkbox{ width:16px; height:16px; }
 
-      /* Left column always visible */
-      #${PANEL_ID} .co-user-left{
-        min-width:0;
-        display:flex;
-        flex-direction:column;
-        gap:2px;
-      }
-      #${PANEL_ID} .co-user-name{
-        font-size:12px; font-weight:900; color:#111827;
-        white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-      }
+      #${PANEL_ID} .co-user-left{ min-width:0; display:flex; flex-direction:column; gap:2px; }
+      #${PANEL_ID} .co-user-name{ font-size:12px; font-weight:900; color:#111827; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      #${PANEL_ID} .co-user-id{ font-size:11px; color:#6b7280; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width: 240px; }
+      #${PANEL_ID} .co-user-right-slot{ align-self:end; }
+      #${PANEL_ID} .co-user-badge{ font-size:11px; font-weight:900; color:#991b1b; background: rgba(220,38,38,.08); border: 1px solid rgba(220,38,38,.22); padding:6px 8px; border-radius: 10px; white-space:nowrap; max-width: 200px; overflow:hidden; text-overflow:ellipsis; }
 
-      /* ID line: we allow badge to "feel like it's at right of ID",
-         but we never overlap name because badge is its own column. */
-      #${PANEL_ID} .co-user-id{
-        font-size:11px; color:#6b7280;
-        white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-        max-width: 240px;
-      }
-
-      /* Right side badge aligned with ID line visually */
-      #${PANEL_ID} .co-user-right-slot{
-        align-self:end; /* align with bottom line (id line) */
-      }
-      #${PANEL_ID} .co-user-badge{
-        font-size:11px;
-        font-weight:900;
-        color:#991b1b;
-        background: rgba(220,38,38,.08);
-        border: 1px solid rgba(220,38,38,.22);
-        padding:6px 8px;
-        border-radius: 10px;
-        white-space:nowrap;
-        max-width: 200px;
-        overflow:hidden;
-        text-overflow:ellipsis;
-      }
-
-      /* ✅ Full-panel shake */
       @keyframes co-card-shake {
         0%,100%{ transform: translateX(0); }
         15%{ transform: translateX(-10px); }
@@ -568,9 +503,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         75%{ transform: translateX(-5px); }
         90%{ transform: translateX(5px); }
       }
-      #${PANEL_ID} .co-card.co-card-shake{
-        animation: co-card-shake .55s ease-in-out 0s 2;
-      }
+      #${PANEL_ID} .co-card.co-card-shake{ animation: co-card-shake .55s ease-in-out 0s 2; }
     `;
     document.documentElement.appendChild(style);
   }
@@ -581,7 +514,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
     root.innerHTML = `
       <button class="co-launch" type="button" aria-label="Open CareerOS">
         <img class="co-launch-logo" src="${chrome.runtime.getURL(
-          !isLikelyJobPage() ? "assets/closed-logo.png" : "assets/logo.png"
+          !isLikelyJobPage() ? "assets/closed-logo.png" : "assets/logo.png",
         )}" alt="CareerOS"/>
       </button>
 
@@ -589,7 +522,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         <div class="co-head">
           <div class="co-title">
             <img src="${chrome.runtime.getURL(
-              "assets/logo.png"
+              "assets/logo.png",
             )}" alt="CareerOS" style="height:16px;width:auto;vertical-align:middle"/>
             <span>CareerOS</span>
             <span id="co_auth_pill" class="co-pill" style="display:none;"></span>
@@ -634,7 +567,6 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
             <label>Job Description (paste)</label>
             <textarea id="co_jd" placeholder="Paste full JD here..."></textarea>
 
-            
             <label>Resume download</label>
             <div class="co-row" style="display:flex; gap:8px; align-items:center;">
               <select id="co_resume_format" style="flex:1;">
@@ -647,7 +579,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
                 Cover letter
               </label>
             </div>
-<button class="co-action" id="co_generate" type="button">Generate</button>
+            <button class="co-action" id="co_generate" type="button">Generate</button>
             <button class="co-action secondary" id="co_logout" type="button">Logout</button>
 
             <div class="co-muted">First time: set base resume via backend PUT /v1/users/{user_id}/base-resume</div>
@@ -734,23 +666,21 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       setAuthStatus("");
     }
 
-    // open/close
     btn.addEventListener("click", () => {
       if (card.style.display === "none") {
         btn.innerHTML = `<img class="co-launch-logo" src="${chrome.runtime.getURL(
-          "assets/logo.png"
+          "assets/logo.png",
         )}" />`;
         openCard();
       } else {
         btn.innerHTML = `<img class="co-launch-logo" src="${chrome.runtime.getURL(
-          "assets/closed-logo.png"
+          "assets/closed-logo.png",
         )}" />`;
         closeCard();
       }
     });
     closeBtn.addEventListener("click", closeCard);
 
-    // backend persist
     ["change", "blur"].forEach((ev) => {
       els.backend.addEventListener(ev, async () => {
         const backend = (els.backend.value || "").trim() || BACKEND_DEFAULT;
@@ -760,7 +690,6 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       });
     });
 
-    // Enter-to-login
     function handleEnterToLogin(e) {
       if (e.key === "Enter") {
         e.preventDefault();
@@ -771,7 +700,6 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
     els.email.addEventListener("keydown", handleEnterToLogin);
     els.password.addEventListener("keydown", handleEnterToLogin);
 
-    // Save app fields
     async function saveAppSettings() {
       await chrome.storage.local.set({
         company: els.company.value.trim(),
@@ -781,6 +709,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         cover_letter: !!els.cover_letter?.checked,
       });
     }
+
     ["change", "blur"].forEach((ev) => {
       els.company.addEventListener(ev, saveAppSettings);
       els.position.addEventListener(ev, saveAppSettings);
@@ -788,7 +717,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       els.resume_format?.addEventListener(ev, saveAppSettings);
     });
     els.cover_letter?.addEventListener("change", saveAppSettings);
-    // URL blur triggers re-check
+
     els.url.addEventListener("blur", () => {
       refreshExistsInList(root, card, els.url).catch(() => {});
     });
@@ -816,7 +745,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
 
         if (!r.ok) {
           setAuthStatus(
-            `Login failed (${r.status}):\n${JSON.stringify(r.data, null, 2)}`
+            `Login failed (${r.status}):\n${JSON.stringify(r.data, null, 2)}`,
           );
           return;
         }
@@ -838,19 +767,18 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
 
         await setupUserPicker(root);
 
-        // re-check when picker interaction
         root.querySelector("#co_userpicker")?.addEventListener("click", () => {
           clearTimeout(root.__coCheckTimer);
           root.__coCheckTimer = setTimeout(
             () => refreshExistsInList(root, card, els.url).catch(() => {}),
-            180
+            180,
           );
         });
         root.querySelector("#co_user_search")?.addEventListener("input", () => {
           clearTimeout(root.__coCheckTimer);
           root.__coCheckTimer = setTimeout(
             () => refreshExistsInList(root, card, els.url).catch(() => {}),
-            260
+            260,
           );
         });
 
@@ -879,7 +807,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         CO_EXISTS_CACHE.clear();
         showAuth(null);
         setAuthStatus(
-          `Logged out locally. (Error calling backend: ${String(e)})`
+          `Logged out locally. (Error calling backend: ${String(e)})`,
         );
         setStatus("");
       }
@@ -895,6 +823,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       const sourceSite = (els.source_site.value || "").trim();
       const resumeFormat = (els.resume_format?.value || "docx").trim();
       const wantCoverLetter = !!els.cover_letter?.checked;
+
       if (
         !selected.length ||
         !jobUrl ||
@@ -919,7 +848,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         for (const uid of selected) {
           const name = CO_USER_MAP.get(String(uid))?.name || String(uid);
           setStatus(
-            `Generating for ${name}... (${okCount}/${selected.length})`
+            `Generating for ${name}... (${okCount}/${selected.length})`,
           );
 
           const r = await apiCall("/v1/ingest/apply-and-generate", {
@@ -929,12 +858,12 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
               url: jobUrl,
               company,
               position,
-              source_site: sourceSite, // ✅ new
-              jd_text: jdText, // keep for backward compatibility
+              source_site: sourceSite,
+              jd_text: jdText,
               include_cover_letter: wantCoverLetter,
             },
           });
-          console.log("response:", r);
+
           if (!r.ok) {
             failures.push({ uid, status: r.status });
             continue;
@@ -957,7 +886,6 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
 
           let downloaded = false;
 
-          // ---- Backend v2: returns file ids + download urls (+ cover letter text)
           const docxRel =
             data.resume_docx_download_url ||
             (data.resume_docx_file_id
@@ -987,13 +915,12 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
               if (pdfUrlAbs) {
                 downloaded = await downloadHttpUrl(
                   pdfUrlAbs,
-                  `${baseFolder}/resume.pdf`
+                  `${baseFolder}/resume.pdf`,
                 );
               } else if (docxUrlAbs) {
-                // fallback
                 downloaded = await downloadHttpUrl(
                   docxUrlAbs,
-                  `${baseFolder}/resume.docx`
+                  `${baseFolder}/resume.docx`,
                 );
               }
             } else if (resumeFormat === "both") {
@@ -1002,26 +929,24 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
               if (docxUrlAbs)
                 ok1 = await downloadHttpUrl(
                   docxUrlAbs,
-                  `${baseFolder}/resume.docx`
+                  `${baseFolder}/resume.docx`,
                 );
               if (pdfUrlAbs)
                 ok2 = await downloadHttpUrl(
                   pdfUrlAbs,
-                  `${baseFolder}/resume.pdf`
+                  `${baseFolder}/resume.pdf`,
                 );
               downloaded = ok1 || ok2;
             } else {
-              // default docx
               if (docxUrlAbs) {
                 downloaded = await downloadHttpUrl(
                   docxUrlAbs,
-                  `${baseFolder}/resume.docx`
+                  `${baseFolder}/resume.docx`,
                 );
               } else if (pdfUrlAbs) {
-                // fallback
                 downloaded = await downloadHttpUrl(
                   pdfUrlAbs,
-                  `${baseFolder}/resume.pdf`
+                  `${baseFolder}/resume.pdf`,
                 );
               }
             }
@@ -1031,14 +956,36 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
               continue;
             }
 
-            // Optional cover letter: download as .txt
+            // ✅ Cover letter as DOCX (Option A) using background generator
             if (wantCoverLetter && data.cover_letter) {
               const clText = String(data.cover_letter || "").trim();
+              console.log("Cover letter text:", clText);
               if (clText) {
-                const clBlob = new Blob([clText], { type: "text/plain" });
-                const clUrl = URL.createObjectURL(clBlob);
-                await downloadHttpUrl(clUrl, `${baseFolder}/cover_letter.txt`);
-                setTimeout(() => URL.revokeObjectURL(clUrl), 30_000);
+                const companySafe = (company || "Company").replace(
+                  /[<>:"/\\|?*]/g,
+                  "_",
+                );
+                const positionSafe = (position || "Role").replace(
+                  /[<>:"/\\|?*]/g,
+                  "_",
+                );
+                const clName = `${baseFolder}/Cover_Letter_${companySafe}_${positionSafe}.docx`;
+
+                const resp = await chrome.runtime.sendMessage({
+                  type: "CO_DOWNLOAD_COVER_LETTER_DOCX",
+                  payload: { text: clText, filename: clName, saveAs: true },
+                });
+
+                // optional fallback to txt if docx download fails
+                if (!resp?.ok) {
+                  const clBlob = new Blob([clText], { type: "text/plain" });
+                  const clUrl = URL.createObjectURL(clBlob);
+                  await downloadHttpUrl(
+                    clUrl,
+                    `${baseFolder}/cover_letter.txt`,
+                  );
+                  setTimeout(() => URL.revokeObjectURL(clUrl), 30_000);
+                }
               }
             }
 
@@ -1046,7 +993,6 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
             continue;
           }
 
-          // ---- Backward compatibility (older backend): base64 docx in response
           if (data.resume_docx_base64) {
             const docxUrl = b64ToBlobUrl(data.resume_docx_base64, mime);
             const filename = `${baseFolder}/resume.docx`;
@@ -1062,27 +1008,24 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
           }
 
           failures.push({ uid, status: "missing_files" });
-          continue;
         }
 
         if (failures.length) {
           setStatus(
-            `✅ Done. Generated for ${okCount}/${selected.length} users.\nFailed: ${failures.length}`
+            `✅ Done. Generated for ${okCount}/${selected.length} users.\nFailed: ${failures.length}`,
           );
         } else {
           setStatus(
-            `✅ Done. Generated for ${okCount}/${selected.length} users.`
+            `✅ Done. Generated for ${okCount}/${selected.length} users.`,
           );
         }
 
         await refreshExistsInList(root, card, els.url);
       } catch (e) {
-        console.log(e);
         setStatus(`Request failed:\n${String(e)}`);
       }
     });
 
-    // Initial load
     (async () => {
       const data = await chrome.storage.local.get([
         "backend",
@@ -1120,14 +1063,14 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
           clearTimeout(root.__coCheckTimer);
           root.__coCheckTimer = setTimeout(
             () => refreshExistsInList(root, card, els.url).catch(() => {}),
-            180
+            180,
           );
         });
         root.querySelector("#co_user_search")?.addEventListener("input", () => {
           clearTimeout(root.__coCheckTimer);
           root.__coCheckTimer = setTimeout(
             () => refreshExistsInList(root, card, els.url).catch(() => {}),
-            260
+            260,
           );
         });
 
@@ -1137,13 +1080,12 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       if (looksLikeJobPage) {
         card.style.display = "block";
         btn.innerHTML = `<img class="co-launch-logo" src="${chrome.runtime.getURL(
-          "assets/logo.png"
+          "assets/logo.png",
         )}" />`;
       }
     })().catch(() => {});
   }
 
-  // Keep alive if removed
   const observer = new MutationObserver(() => {
     if (!document.getElementById(PANEL_ID)) mountPanel();
   });
