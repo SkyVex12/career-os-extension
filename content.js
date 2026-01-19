@@ -423,9 +423,9 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
     const style = document.createElement("style");
     style.id = STYLE_ID;
     style.textContent = `
-      #${PANEL_ID} { position: fixed; right: 16px; bottom: 16px; z-index: 2147483647; font-family: Arial, sans-serif; }
+      #${PANEL_ID} { position: fixed; right: 16px; bottom: 10vh; z-index: 2147483647; font-family: Arial, sans-serif; }
       #${PANEL_ID} .co-launch { border:0; background:transparent; padding:0; cursor:pointer; }
-      #${PANEL_ID} .co-launch-logo { height: 54px; width: 108px; display:block; }
+      #${PANEL_ID} .co-launch-logo { height: 50px; width: 90px; display:block; }
       #${PANEL_ID} .co-card { width: 430px; max-height: 75vh; overflow: auto; margin-top: 10px;
         border-radius: 14px; background: #fff; box-shadow: 0 10px 30px rgba(0,0,0,.25);
         border: 1px solid rgba(0,0,0,.08); transform: translateZ(0); }
