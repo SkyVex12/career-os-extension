@@ -351,7 +351,8 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
   const url = (jobUrl || "").trim();
   if (!url) return;
 
-  const selected = root.__coGetSelectedUserIds?.() || [];
+  // const selected = root.__coGetSelectedUserIds?.() || [];
+  const selected = CO_ALL_USERS.map((u) => String(u.id));
   if (!selected.length) return;
 
   const norm = canonicalizeUrl(url);
@@ -360,6 +361,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
   let idx = 0;
 
   async function worker() {
+    const returns = [];
     while (idx < selected.length) {
       const uid = String(selected[idx++]);
       try {
@@ -372,6 +374,9 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         const exists = !!data.exists;
         const created_at = exists ? extractCreatedAt(data) : "";
         const created_by = exists ? extractCreatedByName(data) : "";
+        if (exists) {
+          returns.push({ user_id: uid, created_at, created_by, raw: data });
+        }
 
         CO_EXISTS_CACHE.set(uid, { exists, created_at, created_by, raw: data });
       } catch {
@@ -379,18 +384,20 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         root.__coRenderUserList?.();
       }
     }
+    return returns;
   }
 
-  await Promise.all(
+  const results = await Promise.all(
     Array.from({ length: Math.min(CONCURRENCY, selected.length) }, () =>
       worker(),
     ),
   );
-
   const anyApplied = selected.some(
     (uid) => CO_EXISTS_CACHE.get(String(uid))?.exists,
   );
   if (anyApplied) shakePanel(cardEl);
+
+  return results;
 }
 
 // ---- main panel ----
@@ -443,6 +450,8 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         margin-top: 10px; width:100%; padding: 10px; border:0; border-radius: 12px;
         cursor:pointer; background:#2563eb; color:#fff; font-weight:900;
       }
+      #${PANEL_ID} .co-action:hover { background:#1e40af; }
+      #${PANEL_ID} .co-action:active { background:#1e3a8a; }
       #${PANEL_ID} .co-action.secondary { background:#111; }
       #${PANEL_ID} .co-status { margin-top: 10px; font-size: 12px; white-space: pre-wrap; color:#111; }
       #${PANEL_ID} .co-muted { color:#6b7280; font-size: 11px; margin-top: 8px; }
@@ -579,7 +588,10 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
                 Cover letter
               </label>
             </div>
-            <button class="co-action" id="co_generate" type="button">Generate</button>
+            <div class="co-row" style="display:flex; gap:8px; align-items:center;">
+              <button class="co-action" id="co_generate" type="button">Generate</button>
+              <button class="co-action" id="co_save" type="button">Save</button>
+            </div>
             <button class="co-action secondary" id="co_logout" type="button">Logout</button>
 
             <div class="co-muted">First time: set base resume via backend PUT /v1/users/{user_id}/base-resume</div>
@@ -591,10 +603,22 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
     return root;
   }
 
-  async function refreshExistsInList(root, cardEl, urlInputEl) {
-    const jobUrl = (urlInputEl?.value || "").trim();
+  async function refreshExistsInList(root, cardEl, els) {
+    const jobUrl = (els.url?.value || "").trim();
     if (!jobUrl) return;
-    await updateExistsForSelected(root, cardEl, jobUrl);
+    const data = await updateExistsForSelected(root, cardEl, jobUrl);
+
+    const latest_application = data.flat()?.sort((a, b) => {
+      const atA = a.created_at || "";
+      const atB = b.created_at || "";
+      return new Date(atB) - new Date(atA);
+    })[0]?.raw?.application;
+
+    console.log("latest_application:", latest_application);
+    els.company.value = latest_application?.company || "";
+    els.position.value = latest_application?.role || "";
+    els.source_site.value = latest_application?.source_site || "";
+    els.jd.value = latest_application?.jd_text || "";
   }
 
   function mountPanel() {
@@ -631,6 +655,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       cover_letter: root.querySelector("#co_cover_letter"),
 
       generate: root.querySelector("#co_generate"),
+      save: root.querySelector("#co_save"),
       logout: root.querySelector("#co_logout"),
     };
 
@@ -719,7 +744,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
     els.cover_letter?.addEventListener("change", saveAppSettings);
 
     els.url.addEventListener("blur", () => {
-      refreshExistsInList(root, card, els.url).catch(() => {});
+      refreshExistsInList(root, card, els).catch(() => {});
     });
 
     // LOGIN
@@ -770,21 +795,21 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         root.querySelector("#co_userpicker")?.addEventListener("click", () => {
           clearTimeout(root.__coCheckTimer);
           root.__coCheckTimer = setTimeout(
-            () => refreshExistsInList(root, card, els.url).catch(() => {}),
+            () => refreshExistsInList(root, card, els).catch(() => {}),
             180,
           );
         });
         root.querySelector("#co_user_search")?.addEventListener("input", () => {
           clearTimeout(root.__coCheckTimer);
           root.__coCheckTimer = setTimeout(
-            () => refreshExistsInList(root, card, els.url).catch(() => {}),
+            () => refreshExistsInList(root, card, els).catch(() => {}),
             260,
           );
         });
 
         els.url.value = location.href;
 
-        await refreshExistsInList(root, card, els.url);
+        await refreshExistsInList(root, card, els);
 
         setAuthStatus("✅ Logged in.");
       } catch (e) {
@@ -813,17 +838,17 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       }
     });
 
-    // GENERATE
-    els.generate.addEventListener("click", async () => {
-      const selected = root.__coGetSelectedUserIds?.() || [];
-      const jobUrl = (els.url.value || "").trim();
-      const company = (els.company.value || "").trim();
-      const position = (els.position.value || "").trim();
-      const jdText = (els.jd.value || "").trim();
-      const sourceSite = (els.source_site.value || "").trim();
-      const resumeFormat = (els.resume_format?.value || "docx").trim();
-      const wantCoverLetter = !!els.cover_letter?.checked;
-
+    const apply_and_generate = async ({
+      selected,
+      jobUrl,
+      company,
+      position,
+      jdText,
+      sourceSite,
+      resumeFormat,
+      wantCoverLetter,
+      haveToGenerate = true,
+    }) => {
       if (
         !selected.length ||
         !jobUrl ||
@@ -848,7 +873,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         for (const uid of selected) {
           const name = CO_USER_MAP.get(String(uid))?.name || String(uid);
           setStatus(
-            `Generating for ${name}... (${okCount}/${selected.length})`,
+            `${haveToGenerate ? "Generating" : "Saving"} for ${name}... (${okCount}/${selected.length})`,
           );
 
           const r = await apiCall("/v1/ingest/apply-and-generate", {
@@ -861,6 +886,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
               source_site: sourceSite,
               jd_text: jdText,
               include_cover_letter: wantCoverLetter,
+              have_to_generate: haveToGenerate,
             },
           });
 
@@ -869,6 +895,10 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
             continue;
           }
 
+          if (!haveToGenerate) {
+            okCount++;
+            continue;
+          }
           const data = r.data || {};
           const backendBase = (els.backend?.value || "" || BACKEND_DEFAULT)
             .trim()
@@ -1012,18 +1042,62 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
 
         if (failures.length) {
           setStatus(
-            `✅ Done. Generated for ${okCount}/${selected.length} users.\nFailed: ${failures.length}`,
+            `✅ Done. ${haveToGenerate ? "Generated" : "Saved"} for ${okCount}/${selected.length} users.\nFailed: ${failures.length}`,
           );
         } else {
           setStatus(
-            `✅ Done. Generated for ${okCount}/${selected.length} users.`,
+            `✅ Done. ${haveToGenerate ? "Generated" : "Saved"} for ${okCount}/${selected.length} users.`,
           );
         }
 
-        await refreshExistsInList(root, card, els.url);
+        await refreshExistsInList(root, card, els);
       } catch (e) {
         setStatus(`Request failed:\n${String(e)}`);
       }
+    };
+    // GENERATE
+    els.generate.addEventListener("click", async () => {
+      const selected = root.__coGetSelectedUserIds?.() || [];
+      const jobUrl = (els.url.value || "").trim();
+      const company = (els.company.value || "").trim();
+      const position = (els.position.value || "").trim();
+      const jdText = (els.jd.value || "").trim();
+      const sourceSite = (els.source_site.value || "").trim();
+      const resumeFormat = (els.resume_format?.value || "docx").trim();
+      const wantCoverLetter = !!els.cover_letter?.checked;
+
+      await apply_and_generate({
+        selected,
+        jobUrl,
+        company,
+        position,
+        jdText,
+        wantCoverLetter,
+        sourceSite,
+        resumeFormat,
+      });
+    });
+
+    els.save.addEventListener("click", async () => {
+      const company = (els.company.value || "").trim();
+      const position = (els.position.value || "").trim();
+      const sourceSite = (els.source_site.value || "").trim();
+      const jobUrl = (els.url.value || "").trim();
+      const jdText = (els.jd.value || "").trim();
+      const resumeFormat = (els.resume_format?.value || "docx").trim();
+      const wantCoverLetter = !!els.cover_letter?.checked;
+
+      await apply_and_generate({
+        selected: root.__coGetSelectedUserIds?.() || [],
+        jobUrl,
+        company,
+        position,
+        jdText,
+        wantCoverLetter,
+        sourceSite,
+        resumeFormat,
+        haveToGenerate: false,
+      });
     });
 
     (async () => {
@@ -1062,19 +1136,19 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         root.querySelector("#co_userpicker")?.addEventListener("click", () => {
           clearTimeout(root.__coCheckTimer);
           root.__coCheckTimer = setTimeout(
-            () => refreshExistsInList(root, card, els.url).catch(() => {}),
+            () => refreshExistsInList(root, card, els).catch(() => {}),
             180,
           );
         });
         root.querySelector("#co_user_search")?.addEventListener("input", () => {
           clearTimeout(root.__coCheckTimer);
           root.__coCheckTimer = setTimeout(
-            () => refreshExistsInList(root, card, els.url).catch(() => {}),
+            () => refreshExistsInList(root, card, els).catch(() => {}),
             260,
           );
         });
 
-        await refreshExistsInList(root, card, els.url);
+        await refreshExistsInList(root, card, els);
       }
 
       if (looksLikeJobPage) {
