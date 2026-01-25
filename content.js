@@ -615,6 +615,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
     })[0]?.raw?.application;
 
     console.log("latest_application:", latest_application);
+    if (!latest_application) return;
     els.company.value = latest_application?.company || "";
     els.position.value = latest_application?.role || "";
     els.source_site.value = latest_application?.source_site || "";
