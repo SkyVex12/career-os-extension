@@ -589,8 +589,8 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
                 <option value="both">DOCX + PDF</option>
               </select>
               <label style="display:flex; align-items:center; gap:6px; font-size:12px; margin-top:4px; white-space:nowrap;">
-                <input id="co_cover_letter" type="checkbox" style="width:auto; margin:0;" />
-                Cover letter
+                <input id="co_close_gpt_tab" type="checkbox" style="width:auto; margin:0;" />
+                Close GPT tab
               </label>
             </div>
             <div class="co-row" style="display:flex; gap:8px; align-items:center;">
@@ -661,7 +661,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       jd: root.querySelector("#co_jd"),
       resume_json: root.querySelector("#co_resume_json"),
       resume_format: root.querySelector("#co_resume_format"),
-      cover_letter: root.querySelector("#co_cover_letter"),
+      close_gpt_tab: root.querySelector("#co_close_gpt_tab"),
 
       generate: root.querySelector("#co_generate"),
       gpt_gen: root.querySelector("#co_gpt_gen"),
@@ -745,7 +745,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         position: els.position.value.trim(),
         source_site: els.source_site.value.trim(),
         resume_format: (els.resume_format?.value || "docx").trim(),
-        cover_letter: !!els.cover_letter?.checked,
+        close_gpt_tab: !!els.close_gpt_tab?.checked,
       });
     }
 
@@ -755,7 +755,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       els.source_site.addEventListener(ev, saveAppSettings);
       els.resume_format?.addEventListener(ev, saveAppSettings);
     });
-    els.cover_letter?.addEventListener("change", saveAppSettings);
+    els.close_gpt_tab?.addEventListener("change", saveAppSettings);
 
     els.url.addEventListener("blur", () => {
       refreshExistsInList(root, card, els).catch(() => {});
@@ -1081,7 +1081,6 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       const resumeJsonText = (els.resume_json?.value || "").trim();
       const sourceSite = (els.source_site.value || "").trim();
       const resumeFormat = (els.resume_format?.value || "docx").trim();
-      const wantCoverLetter = !!els.cover_letter?.checked;
 
       await apply_and_generate({
         selected,
@@ -1090,7 +1089,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         position,
         jdText,
         resumeJsonText,
-        wantCoverLetter,
+        wantCoverLetter: false,
         sourceSite,
         resumeFormat,
       });
@@ -1104,7 +1103,6 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       const jdText = (els.jd.value || "").trim();
       const resumeJsonText = (els.resume_json?.value || "").trim();
       const resumeFormat = (els.resume_format?.value || "docx").trim();
-      const wantCoverLetter = !!els.cover_letter?.checked;
 
       await apply_and_generate({
         selected: root.__coGetSelectedUserIds?.() || [],
@@ -1113,7 +1111,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         position,
         jdText,
         resumeJsonText,
-        wantCoverLetter,
+        wantCoverLetter: false,
         sourceSite,
         resumeFormat,
         haveToGenerate: false,
@@ -1187,11 +1185,10 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       const jdText = (els.jd.value || "").trim();
       const sourceSite = (els.source_site.value || "").trim();
       const resumeFormat = (els.resume_format?.value || "docx").trim();
-      const wantCoverLetter = !!els.cover_letter?.checked;
 
       apply_and_generate({
         selected, jobUrl, company, position,
-        jdText, resumeJsonText: text, wantCoverLetter, sourceSite, resumeFormat,
+        jdText, resumeJsonText: text, wantCoverLetter: false, sourceSite, resumeFormat,
       });
 
       return false;
@@ -1213,7 +1210,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         "position",
         "source_site",
         "resume_format",
-        "cover_letter",
+        "close_gpt_tab",
       ]);
 
       els.backend.value = data.backend || BACKEND_DEFAULT;
@@ -1223,7 +1220,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       els.source_site.value = data.source_site || "";
       if (els.resume_format)
         els.resume_format.value = data.resume_format || "docx";
-      if (els.cover_letter) els.cover_letter.checked = !!data.cover_letter;
+      if (els.close_gpt_tab) els.close_gpt_tab.checked = !!data.close_gpt_tab;
       els.url.value = location.href;
 
       await pushAuthToBackground({

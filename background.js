@@ -456,10 +456,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       }
 
-      // 6) GPT response from chatgpt-bridge.js — relay to origin tab and close GPT tab
+      // 6) GPT response from chatgpt-bridge.js — relay to origin tab and optionally close GPT tab
       // payload: { text } on success, { error } on failure
       if (msg.type === "CO_GPT_RESULT") {
-        const stored = await chrome.storage.local.get(["gptJob"]);
+        const stored = await chrome.storage.local.get(["gptJob", "close_gpt_tab"]);
         const originTabId = stored.gptJob?.originTabId;
 
         if (originTabId) {
@@ -472,8 +472,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             .catch(() => {});
         }
 
-        // Close the ChatGPT tab
-        if (sender.tab?.id) {
+        // Close the ChatGPT tab only if the user opted in
+        if (stored.close_gpt_tab && sender.tab?.id) {
           chrome.tabs.remove(sender.tab.id).catch(() => {});
         }
 
