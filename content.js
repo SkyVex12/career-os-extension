@@ -5,6 +5,7 @@ const BACKEND_DEFAULT = "https://career-os.onrender.com";
 let CO_USER_MAP = new Map(); // user_id -> { id, name }
 let CO_ALL_USERS = []; // [{id, name}]
 let CO_EXISTS_CACHE = new Map(); // user_id -> { exists, created_at, created_by, raw }
+let _coGptMsgListener = null;
 
 function canonicalizeUrl(input) {
   try {
@@ -575,6 +576,8 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
             <input id="co_position" placeholder="Senior Software Engineer" />
             <label>Job Description (paste)</label>
             <textarea id="co_jd" placeholder="Paste full JD here..."></textarea>
+            <label>Resume JSON (GPT output)</label>
+            <textarea id="co_resume_json" placeholder="GPT-generated resume JSON will appear here..."></textarea>
 
             <label>Resume download</label>
             <div class="co-row" style="display:flex; gap:8px; align-items:center;">
@@ -590,6 +593,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
             </div>
             <div class="co-row" style="display:flex; gap:8px; align-items:center;">
               <button class="co-action" id="co_generate" type="button">Generate</button>
+              <button class="co-action" id="co_gpt_gen" type="button" style="background:#7c3aed;">GPT Gen</button>
               <button class="co-action" id="co_save" type="button">Save</button>
             </div>
             <button class="co-action secondary" id="co_logout" type="button">Logout</button>
@@ -652,10 +656,12 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       company: root.querySelector("#co_company"),
       position: root.querySelector("#co_position"),
       jd: root.querySelector("#co_jd"),
+      resume_json: root.querySelector("#co_resume_json"),
       resume_format: root.querySelector("#co_resume_format"),
       cover_letter: root.querySelector("#co_cover_letter"),
 
       generate: root.querySelector("#co_generate"),
+      gpt_gen: root.querySelector("#co_gpt_gen"),
       save: root.querySelector("#co_save"),
       logout: root.querySelector("#co_logout"),
     };
@@ -845,6 +851,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       company,
       position,
       jdText,
+      resumeJsonText,
       sourceSite,
       resumeFormat,
       wantCoverLetter,
@@ -886,6 +893,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
               position,
               source_site: sourceSite,
               jd_text: jdText,
+              resume_json_text: resumeJsonText || "",
               include_cover_letter: wantCoverLetter,
               have_to_generate: haveToGenerate,
             },
@@ -1063,6 +1071,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       const company = (els.company.value || "").trim();
       const position = (els.position.value || "").trim();
       const jdText = (els.jd.value || "").trim();
+      const resumeJsonText = (els.resume_json?.value || "").trim();
       const sourceSite = (els.source_site.value || "").trim();
       const resumeFormat = (els.resume_format?.value || "docx").trim();
       const wantCoverLetter = !!els.cover_letter?.checked;
@@ -1073,6 +1082,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         company,
         position,
         jdText,
+        resumeJsonText,
         wantCoverLetter,
         sourceSite,
         resumeFormat,
@@ -1085,6 +1095,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       const sourceSite = (els.source_site.value || "").trim();
       const jobUrl = (els.url.value || "").trim();
       const jdText = (els.jd.value || "").trim();
+      const resumeJsonText = (els.resume_json?.value || "").trim();
       const resumeFormat = (els.resume_format?.value || "docx").trim();
       const wantCoverLetter = !!els.cover_letter?.checked;
 
@@ -1094,12 +1105,95 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         company,
         position,
         jdText,
+        resumeJsonText,
         wantCoverLetter,
         sourceSite,
         resumeFormat,
         haveToGenerate: false,
       });
     });
+
+    // GPT GEN
+    els.gpt_gen?.addEventListener("click", async () => {
+      const company = (els.company.value || "").trim();
+      const position = (els.position.value || "").trim();
+      const jd = (els.jd.value || "").trim();
+
+      if (!company || !position) {
+        setStatus("Company and Position are required for GPT Gen.");
+        return;
+      }
+
+      setStatus("Opening ChatGPT... waiting for GPT response.");
+      els.gpt_gen.disabled = true;
+      els.gpt_gen.textContent = "Waiting for GPT...";
+
+      const resp = await chrome.runtime.sendMessage({
+        type: "CO_GPT_OPEN",
+        payload: { company, position, jd },
+      });
+
+      if (!resp?.ok) {
+        setStatus(`Failed to open ChatGPT: ${resp?.error || "Unknown error"}`);
+        els.gpt_gen.disabled = false;
+        els.gpt_gen.textContent = "GPT Gen";
+      }
+    });
+
+    // Listener for GPT response relayed from background.js
+    const _coGptMessageListener = (msg) => {
+      if (!msg || msg.type !== "CO_GPT_RESULT") return false;
+
+      els.gpt_gen.disabled = false;
+      els.gpt_gen.textContent = "GPT Gen";
+
+      if (msg.error) {
+        setStatus(`GPT error: ${msg.error}`);
+        return false;
+      }
+
+      const text = (msg.text || "").trim();
+      if (!text) {
+        setStatus("GPT returned empty response.");
+        return false;
+      }
+
+      els.resume_json.value = text;
+
+      // Parse GPT JSON and check blocked flag
+      let parsed = null;
+      try { parsed = JSON.parse(text); } catch (_) {}
+
+      if (parsed?.blocked) {
+        const reason = parsed.block_reason || "No reason provided.";
+        setStatus(`⛔ You shouldn't apply to this job because of: ${reason}`);
+        return false;
+      }
+
+      setStatus("GPT response received. Generating resume...");
+
+      const selected = root.__coGetSelectedUserIds?.() || [];
+      const jobUrl = (els.url.value || "").trim();
+      const company = (els.company.value || "").trim();
+      const position = (els.position.value || "").trim();
+      const jdText = (els.jd.value || "").trim();
+      const sourceSite = (els.source_site.value || "").trim();
+      const resumeFormat = (els.resume_format?.value || "docx").trim();
+      const wantCoverLetter = !!els.cover_letter?.checked;
+
+      apply_and_generate({
+        selected, jobUrl, company, position,
+        jdText, resumeJsonText: text, wantCoverLetter, sourceSite, resumeFormat,
+      });
+
+      return false;
+    };
+
+    if (_coGptMsgListener) {
+      chrome.runtime.onMessage.removeListener(_coGptMsgListener);
+    }
+    _coGptMsgListener = _coGptMessageListener;
+    chrome.runtime.onMessage.addListener(_coGptMsgListener);
 
     (async () => {
       const data = await chrome.storage.local.get([

@@ -7,6 +7,8 @@
 // - CO_DOWNLOAD_COVER_LETTER_DOCX: generate a minimal DOCX from a string and download it
 
 const DEFAULT_BACKEND = "https://career-os.onrender.com";
+const CHATGPT_GPT_URL =
+  "https://chatgpt.com/g/g-69bae439336881919d76677f0f547cf4-resume-builder/c/69baf345-f5c8-832a-abf0-24646d3ac559";
 
 async function getConfig() {
   const { backend, authToken } = await chrome.storage.local.get([
@@ -425,6 +427,52 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
 
         sendResponse({ ok: true, downloadId: created.id });
+        return;
+      }
+
+      // 5) Open ChatGPT tab for GPT-assisted generation
+      // payload: { company, position, jd }
+      if (msg.type === "CO_GPT_OPEN") {
+        const { company, position, jd } = msg.payload || {};
+        const originTabId = sender.tab?.id;
+
+        if (!company || !position) {
+          sendResponse({ ok: false, error: "Missing company or position" });
+          return;
+        }
+
+        await chrome.storage.local.set({
+          gptJob: { company, position, jd: jd || "", originTabId, consumed: false },
+        });
+
+        chrome.tabs.create({ url: CHATGPT_GPT_URL });
+
+        sendResponse({ ok: true });
+        return;
+      }
+
+      // 6) GPT response from chatgpt-bridge.js — relay to origin tab and close GPT tab
+      // payload: { text } on success, { error } on failure
+      if (msg.type === "CO_GPT_RESULT") {
+        const stored = await chrome.storage.local.get(["gptJob"]);
+        const originTabId = stored.gptJob?.originTabId;
+
+        if (originTabId) {
+          chrome.tabs
+            .sendMessage(originTabId, {
+              type: "CO_GPT_RESULT",
+              text: msg.payload?.text || null,
+              error: msg.payload?.error || null,
+            })
+            .catch(() => {});
+        }
+
+        // Close the ChatGPT tab
+        if (sender.tab?.id) {
+          chrome.tabs.remove(sender.tab.id).catch(() => {});
+        }
+
+        sendResponse({ ok: true });
         return;
       }
 

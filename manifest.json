@@ -13,7 +13,8 @@
     "https://job-boards.greenhouse.io/*",
     "http://127.0.0.1/*",
     "http://localhost/*",
-    "http://0.0.0.0/*"
+    "http://0.0.0.0/*",
+    "https://chatgpt.com/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -25,6 +26,15 @@
       ],
       "js": [
         "content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "chatgpt-bridge.js"
       ],
       "run_at": "document_idle"
     }
