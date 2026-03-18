@@ -433,7 +433,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // 5) Open ChatGPT tab for GPT-assisted generation
       // payload: { company, position, jd }
       if (msg.type === "CO_GPT_OPEN") {
-        const { company, position, jd } = msg.payload || {};
+        const { company, position, jd, gptUrl } = msg.payload || {};
         const originTabId = sender.tab?.id;
 
         if (!company || !position) {
@@ -441,11 +441,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return;
         }
 
+        if (!gptUrl) {
+          sendResponse({ ok: false, error: "GPT URL is not set. Please set it in the login settings." });
+          return;
+        }
+
         await chrome.storage.local.set({
           gptJob: { company, position, jd: jd || "", originTabId, consumed: false },
         });
 
-        chrome.tabs.create({ url: CHATGPT_GPT_URL });
+        chrome.tabs.create({ url: gptUrl });
 
         sendResponse({ ok: true });
         return;

@@ -544,6 +544,8 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
           <div id="co_auth_view">
             <label>Backend</label>
             <input id="co_backend" placeholder="http://127.0.0.1:8000" />
+            <label>GPT URL</label>
+            <input id="co_gpt_url" placeholder="https://chatgpt.com/g/..." />
             <div class="co-divider"></div>
             <label>Email</label>
             <input id="co_email" placeholder="you@example.com" autocomplete="username"/>
@@ -646,6 +648,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
 
     const els = {
       backend: root.querySelector("#co_backend"),
+      gpt_url: root.querySelector("#co_gpt_url"),
       email: root.querySelector("#co_email"),
       password: root.querySelector("#co_password"),
       login: root.querySelector("#co_login"),
@@ -719,6 +722,10 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         await chrome.storage.local.set({ backend });
         const { authToken } = await chrome.storage.local.get(["authToken"]);
         await pushAuthToBackground({ token: authToken || "", backend });
+      });
+      els.gpt_url.addEventListener(ev, async () => {
+        const gptUrl = (els.gpt_url.value || "").trim();
+        await chrome.storage.local.set({ gptUrl });
       });
     });
 
@@ -1128,9 +1135,10 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       els.gpt_gen.disabled = true;
       els.gpt_gen.textContent = "Waiting for GPT...";
 
+      const gptUrl = (els.gpt_url.value || "").trim();
       const resp = await chrome.runtime.sendMessage({
         type: "CO_GPT_OPEN",
-        payload: { company, position, jd },
+        payload: { company, position, jd, gptUrl },
       });
 
       if (!resp?.ok) {
@@ -1198,6 +1206,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
     (async () => {
       const data = await chrome.storage.local.get([
         "backend",
+        "gptUrl",
         "authToken",
         "principal",
         "company",
@@ -1208,6 +1217,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       ]);
 
       els.backend.value = data.backend || BACKEND_DEFAULT;
+      els.gpt_url.value = data.gptUrl || "";
       els.company.value = data.company || "";
       els.position.value = data.position || "";
       els.source_site.value = data.source_site || "";
