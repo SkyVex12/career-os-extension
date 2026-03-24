@@ -177,6 +177,7 @@ async function setupUserPicker(root) {
     selected = new Set(CO_ALL_USERS.map((u) => String(u.id)));
     saveSelected().catch(() => {});
     render();
+    root.__coOnSelectionChange?.();
   }
 
   function clearAll() {
@@ -184,6 +185,7 @@ async function setupUserPicker(root) {
     selected = new Set();
     saveSelected().catch(() => {});
     render();
+    root.__coOnSelectionChange?.();
   }
 
   function toggleUser(id) {
@@ -193,6 +195,7 @@ async function setupUserPicker(root) {
     else selected.add(id);
     saveSelected().catch(() => {});
     render();
+    root.__coOnSelectionChange?.();
   }
 
   function removeChip(id) {
@@ -201,6 +204,7 @@ async function setupUserPicker(root) {
     selected.delete(id);
     saveSelected().catch(() => {});
     render();
+    root.__coOnSelectionChange?.();
   }
 
   function renderChips() {
@@ -393,10 +397,15 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       worker(),
     ),
   );
-  const anyApplied = selected.some(
-    (uid) => CO_EXISTS_CACHE.get(String(uid))?.exists,
-  );
-  if (anyApplied) shakePanel(cardEl);
+  const pickerSelected = new Set((root.__coGetSelectedUserIds?.() || []).map(String));
+  const anyApplied = pickerSelected.size > 0
+    ? Array.from(pickerSelected).some((uid) => CO_EXISTS_CACHE.get(uid)?.exists)
+    : false;
+  const normUrl = canonicalizeUrl(url);
+  if (anyApplied && root.__coShakenUrl !== normUrl) {
+    root.__coShakenUrl = normUrl;
+    shakePanel(cardEl);
+  }
 
   return results;
 }
@@ -514,6 +523,24 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         90%{ transform: translateX(5px); }
       }
       #${PANEL_ID} .co-card.co-card-shake{ animation: co-card-shake .55s ease-in-out 0s 2; }
+
+      /* upload section */
+      #${PANEL_ID} .co-section-toggle{
+        margin-top:10px; width:100%; padding:8px 10px;
+        border:1px solid #d1d5db; border-radius:10px;
+        cursor:pointer; background:#f9fafb; color:#374151;
+        font-weight:900; font-size:12px; text-align:left;
+      }
+      #${PANEL_ID} .co-section-toggle:hover{ background:#f3f4f6; }
+      #${PANEL_ID} .co-upload-section{
+        border:1px solid #bbf7d0; border-radius:12px;
+        padding:10px; margin-top:6px; background:#f0fdf4;
+      }
+      #${PANEL_ID} .co-upload-section input[type="file"]{
+        padding:6px; cursor:pointer;
+      }
+      #${PANEL_ID} .co-upload-ok{ color:#15803d; }
+      #${PANEL_ID} .co-upload-err{ color:#dc2626; }
     `;
     document.documentElement.appendChild(style);
   }
@@ -578,6 +605,8 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
             <input id="co_position" placeholder="Senior Software Engineer" />
             <label>Job Description (paste)</label>
             <textarea id="co_jd" placeholder="Paste full JD here..."></textarea>
+            <label>Important Note (for GPT)</label>
+            <input id="co_important_note" placeholder="e.g. Focus on Python skills, avoid mentioning X..." />
             <label>Resume JSON (GPT output)</label>
             <textarea id="co_resume_json" placeholder="GPT-generated resume JSON will appear here..."></textarea>
 
@@ -600,6 +629,16 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
             </div>
             <button class="co-action secondary" id="co_logout" type="button">Logout</button>
 
+            <button class="co-section-toggle" id="co_upload_toggle" type="button">▾ Upload Tailored Resume</button>
+            <div id="co_upload_section" class="co-upload-section" style="display:none;">
+              <label>Application ID</label>
+              <input id="co_upload_app_id" placeholder="Auto-filled after Generate / Save" />
+              <label>Resume File (.pdf, .doc, .docx)</label>
+              <input id="co_upload_file" type="file" accept=".pdf,.doc,.docx" />
+              <button class="co-action" id="co_upload_btn" type="button" style="background:#059669;">Upload</button>
+              <div class="co-status" id="co_upload_status"></div>
+            </div>
+
             <div class="co-muted">First time: set base resume via backend PUT /v1/users/{user_id}/base-resume</div>
             <div class="co-status" id="co_status"></div>
           </div>
@@ -614,11 +653,14 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
     if (!jobUrl) return;
     const data = await updateExistsForSelected(root, cardEl, jobUrl);
 
-    const latest_application = data.flat()?.sort((a, b) => {
-      const atA = a.created_at || "";
-      const atB = b.created_at || "";
-      return new Date(atB) - new Date(atA);
-    })[0]?.raw?.application;
+    const selectedIds = new Set((root.__coGetSelectedUserIds?.() || []).map(String));
+    const latest_application = data.flat()
+      ?.filter((item) => selectedIds.has(String(item.user_id)))
+      ?.sort((a, b) => {
+        const atA = a.created_at || "";
+        const atB = b.created_at || "";
+        return new Date(atB) - new Date(atA);
+      })[0]?.raw?.application;
 
     console.log("latest_application:", latest_application);
     if (!latest_application) return;
@@ -626,6 +668,9 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
     els.position.value = latest_application?.role || "";
     els.source_site.value = latest_application?.source_site || "";
     els.jd.value = latest_application?.jd_text || "";
+    if (latest_application?.id && els.upload_app_id) {
+      els.upload_app_id.value = latest_application.id;
+    }
   }
 
   function mountPanel() {
@@ -659,6 +704,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       company: root.querySelector("#co_company"),
       position: root.querySelector("#co_position"),
       jd: root.querySelector("#co_jd"),
+      important_note: root.querySelector("#co_important_note"),
       resume_json: root.querySelector("#co_resume_json"),
       resume_format: root.querySelector("#co_resume_format"),
       close_gpt_tab: root.querySelector("#co_close_gpt_tab"),
@@ -667,6 +713,32 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       gpt_gen: root.querySelector("#co_gpt_gen"),
       save: root.querySelector("#co_save"),
       logout: root.querySelector("#co_logout"),
+
+      upload_toggle: root.querySelector("#co_upload_toggle"),
+      upload_section: root.querySelector("#co_upload_section"),
+      upload_app_id: root.querySelector("#co_upload_app_id"),
+      upload_file: root.querySelector("#co_upload_file"),
+      upload_btn: root.querySelector("#co_upload_btn"),
+      upload_status: root.querySelector("#co_upload_status"),
+    };
+
+    // Re-evaluate upload_app_id from cache whenever selection changes (no API call)
+    root.__coOnSelectionChange = () => {
+      if (!els.upload_app_id) return;
+      const selectedIds = new Set((root.__coGetSelectedUserIds?.() || []).map(String));
+      let latestAppId = "";
+      let latestDate = "";
+      for (const [uid, cache] of CO_EXISTS_CACHE) {
+        if (!selectedIds.has(uid) || !cache.exists) continue;
+        const appId = cache.raw?.application?.id;
+        const createdAt = cache.raw?.application?.created_at || cache.created_at || "";
+        if (!appId) continue;
+        if (!latestDate || createdAt > latestDate) {
+          latestDate = createdAt;
+          latestAppId = String(appId);
+        }
+      }
+      els.upload_app_id.value = latestAppId;
     };
 
     function setAuthStatus(msg) {
@@ -852,6 +924,95 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       }
     });
 
+    // UPLOAD TOGGLE
+    els.upload_toggle?.addEventListener("click", () => {
+      const visible = els.upload_section.style.display !== "none";
+      els.upload_section.style.display = visible ? "none" : "block";
+      els.upload_toggle.textContent = visible
+        ? "▾ Upload Tailored Resume"
+        : "▴ Upload Tailored Resume";
+    });
+
+    // UPLOAD TAILORED RESUME
+    els.upload_btn?.addEventListener("click", async () => {
+      const appId = (els.upload_app_id?.value || "").trim();
+      const file = els.upload_file?.files?.[0];
+
+      function setUploadStatus(msg, isErr = false) {
+        if (!els.upload_status) return;
+        els.upload_status.textContent = msg;
+        els.upload_status.className =
+          "co-status " + (isErr ? "co-upload-err" : "co-upload-ok");
+      }
+
+      const selectedForUpload = root.__coGetSelectedUserIds?.() || [];
+      if (selectedForUpload.length > 1) {
+        setUploadStatus("Upload is not allowed for multiple users. Please select a single user.", true);
+        return;
+      }
+
+      if (!appId) {
+        setUploadStatus("Application ID is required.", true);
+        return;
+      }
+      if (!file) {
+        setUploadStatus("Please select a file (.pdf, .doc, or .docx).", true);
+        return;
+      }
+
+      const ext = file.name.split(".").pop().toLowerCase();
+      if (!["pdf", "doc", "docx"].includes(ext)) {
+        setUploadStatus("Only .pdf, .doc, or .docx files are accepted.", true);
+        return;
+      }
+
+      setUploadStatus("Uploading...");
+      els.upload_btn.disabled = true;
+
+      try {
+        const { authToken, backend } = await chrome.storage.local.get([
+          "authToken",
+          "backend",
+        ]);
+        const backendBase = (backend || BACKEND_DEFAULT)
+          .trim()
+          .replace(/\/$/, "");
+
+        const formData = new FormData();
+        formData.append("application_id", appId);
+        formData.append("file", file);
+
+        const res = await fetch(
+          `${backendBase}/v1/ingest/upload-tailored-resume`,
+          {
+            method: "POST",
+            headers: { "X-Auth-Token": authToken || "" },
+            body: formData,
+          },
+        );
+
+        const ct = (res.headers.get("content-type") || "").toLowerCase();
+        const data = ct.includes("application/json")
+          ? await res.json()
+          : await res.text();
+
+        if (res.ok) {
+          setUploadStatus("✅ Resume uploaded successfully.");
+          els.upload_file.value = "";
+        } else {
+          const detail =
+            typeof data === "object"
+              ? JSON.stringify(data, null, 2)
+              : String(data);
+          setUploadStatus(`Upload failed (${res.status}):\n${detail}`, true);
+        }
+      } catch (e) {
+        setUploadStatus(`Upload error:\n${String(e)}`, true);
+      } finally {
+        els.upload_btn.disabled = false;
+      }
+    });
+
     const apply_and_generate = async ({
       selected,
       jobUrl,
@@ -872,7 +1033,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         jdText.length < 50
       ) {
         setStatus("Missing fields. JD must be at least ~50 chars.");
-        return;
+        return { ok: false };
       }
 
       setStatus("Preparing JD keys (cache-aware)...");
@@ -912,6 +1073,13 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
           }
 
           if (!haveToGenerate) {
+            // Auto-fill upload section with application_id from save response
+            const savedData = r.data || {};
+            const savedAppId =
+              savedData.application_id || savedData.applicationId || "";
+            if (savedAppId && els.upload_app_id && !els.upload_app_id.value) {
+              els.upload_app_id.value = savedAppId;
+            }
             okCount++;
             continue;
           }
@@ -921,6 +1089,11 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
             .replace(/\/$/, "");
           const appId = data.application_id || data.applicationId || "";
           const resumeFolder = `CareerOS/${uid}/${appId}`;
+
+          // Auto-fill upload section with the latest application_id
+          if (appId && els.upload_app_id && !els.upload_app_id.value) {
+            els.upload_app_id.value = appId;
+          }
 
           async function downloadHttpUrl(url, filename) {
             const resp = await chrome.runtime.sendMessage({
@@ -1067,8 +1240,10 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         }
 
         await refreshExistsInList(root, card, els);
+        return { ok: failures.length === 0 };
       } catch (e) {
         setStatus(`Request failed:\n${String(e)}`);
+        return { ok: false };
       }
     };
     // GENERATE
@@ -1123,6 +1298,18 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       const company = (els.company.value || "").trim();
       const position = (els.position.value || "").trim();
       const jd = (els.jd.value || "").trim();
+      const note = (els.important_note?.value || "").trim();
+      const jdWithNote =
+        jd +
+        (note
+          ? `\nIMPORTANT:${note}`
+          : "\nIMPORTANT:All required and nice-to-have skills should be reflected in the resume experience and skills sections.");
+
+      const selectedForGpt = root.__coGetSelectedUserIds?.() || [];
+      if (selectedForGpt.length > 1) {
+        setStatus("GPT Gen is not allowed for multiple users. Please select a single user.");
+        return;
+      }
 
       if (!company || !position) {
         setStatus("Company and Position are required for GPT Gen.");
@@ -1136,7 +1323,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       const gptUrl = (els.gpt_url.value || "").trim();
       const resp = await chrome.runtime.sendMessage({
         type: "CO_GPT_OPEN",
-        payload: { company, position, jd, gptUrl },
+        payload: { company, position, jd: jdWithNote, gptUrl },
       });
 
       if (!resp?.ok) {
@@ -1168,7 +1355,9 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
 
       // Parse GPT JSON and check blocked flag
       let parsed = null;
-      try { parsed = JSON.parse(text); } catch (_) {}
+      try {
+        parsed = JSON.parse(text);
+      } catch (_) {}
 
       if (parsed?.blocked) {
         const reason = parsed.block_reason || "No reason provided.";
@@ -1187,8 +1376,22 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       const resumeFormat = (els.resume_format?.value || "docx").trim();
 
       apply_and_generate({
-        selected, jobUrl, company, position,
-        jdText, resumeJsonText: text, wantCoverLetter: false, sourceSite, resumeFormat,
+        selected,
+        jobUrl,
+        company,
+        position,
+        jdText,
+        resumeJsonText: text,
+        wantCoverLetter: false,
+        sourceSite,
+        resumeFormat,
+      }).then((result) => {
+        if (!result?.ok) {
+          const current = (statusEl.textContent || "").trim();
+          setStatus(
+            `${current}\n💡 Resume JSON is saved in the textarea — click Generate to retry without re-running GPT.`,
+          );
+        }
       });
 
       return false;
