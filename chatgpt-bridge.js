@@ -79,8 +79,8 @@ async function sendResult(payload) {
       "[data-message-author-role='assistant']"
     ).length;
 
-    // Build the prompt
-    const prompt = [
+    // Build the prompt (use custom prompt if provided, e.g. for cover letter)
+    const prompt = job.prompt || [
       `Company: ${job.company}`,
       `Position: ${job.position}`,
       "",

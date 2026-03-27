@@ -397,10 +397,15 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       worker(),
     ),
   );
-  const pickerSelected = new Set((root.__coGetSelectedUserIds?.() || []).map(String));
-  const anyApplied = pickerSelected.size > 0
-    ? Array.from(pickerSelected).some((uid) => CO_EXISTS_CACHE.get(uid)?.exists)
-    : false;
+  const pickerSelected = new Set(
+    (root.__coGetSelectedUserIds?.() || []).map(String),
+  );
+  const anyApplied =
+    pickerSelected.size > 0
+      ? Array.from(pickerSelected).some(
+          (uid) => CO_EXISTS_CACHE.get(uid)?.exists,
+        )
+      : false;
   const normUrl = canonicalizeUrl(url);
   if (anyApplied && root.__coShakenUrl !== normUrl) {
     root.__coShakenUrl = normUrl;
@@ -607,8 +612,10 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
             <textarea id="co_jd" placeholder="Paste full JD here..."></textarea>
             <label>Important Note (for GPT)</label>
             <input id="co_important_note" placeholder="e.g. Focus on Python skills, avoid mentioning X..." />
-            <label>Resume JSON (GPT output)</label>
+            <label>Resume JSON (GPT output) / (Cover Letter Input)</label>
             <textarea id="co_resume_json" placeholder="GPT-generated resume JSON will appear here..."></textarea>
+            <label>Cover Letter (GPT output)</label>
+            <textarea id="co_cover_letter" placeholder="GPT-generated cover letter will appear here..."></textarea>
 
             <label>Resume download</label>
             <div class="co-row" style="display:flex; gap:8px; align-items:center;">
@@ -625,6 +632,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
             <div class="co-row" style="display:flex; gap:8px; align-items:center;">
               <button class="co-action" id="co_generate" type="button">Generate</button>
               <button class="co-action" id="co_gpt_gen" type="button" style="background:#7c3aed;">GPT Gen</button>
+              <button class="co-action" id="co_gpt_cover_letter" type="button" style="background:#0891b2;">C Letter</button>
               <button class="co-action" id="co_save" type="button">Save</button>
             </div>
             <button class="co-action secondary" id="co_logout" type="button">Logout</button>
@@ -653,8 +661,11 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
     if (!jobUrl) return;
     const data = await updateExistsForSelected(root, cardEl, jobUrl);
 
-    const selectedIds = new Set((root.__coGetSelectedUserIds?.() || []).map(String));
-    const latest_application = data.flat()
+    const selectedIds = new Set(
+      (root.__coGetSelectedUserIds?.() || []).map(String),
+    );
+    const latest_application = data
+      .flat()
       ?.filter((item) => selectedIds.has(String(item.user_id)))
       ?.sort((a, b) => {
         const atA = a.created_at || "";
@@ -706,11 +717,13 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       jd: root.querySelector("#co_jd"),
       important_note: root.querySelector("#co_important_note"),
       resume_json: root.querySelector("#co_resume_json"),
+      cover_letter: root.querySelector("#co_cover_letter"),
       resume_format: root.querySelector("#co_resume_format"),
       close_gpt_tab: root.querySelector("#co_close_gpt_tab"),
 
       generate: root.querySelector("#co_generate"),
       gpt_gen: root.querySelector("#co_gpt_gen"),
+      gpt_cover_letter: root.querySelector("#co_gpt_cover_letter"),
       save: root.querySelector("#co_save"),
       logout: root.querySelector("#co_logout"),
 
@@ -725,13 +738,16 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
     // Re-evaluate upload_app_id from cache whenever selection changes (no API call)
     root.__coOnSelectionChange = () => {
       if (!els.upload_app_id) return;
-      const selectedIds = new Set((root.__coGetSelectedUserIds?.() || []).map(String));
+      const selectedIds = new Set(
+        (root.__coGetSelectedUserIds?.() || []).map(String),
+      );
       let latestAppId = "";
       let latestDate = "";
       for (const [uid, cache] of CO_EXISTS_CACHE) {
         if (!selectedIds.has(uid) || !cache.exists) continue;
         const appId = cache.raw?.application?.id;
-        const createdAt = cache.raw?.application?.created_at || cache.created_at || "";
+        const createdAt =
+          cache.raw?.application?.created_at || cache.created_at || "";
         if (!appId) continue;
         if (!latestDate || createdAt > latestDate) {
           latestDate = createdAt;
@@ -947,7 +963,10 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
 
       const selectedForUpload = root.__coGetSelectedUserIds?.() || [];
       if (selectedForUpload.length > 1) {
-        setUploadStatus("Upload is not allowed for multiple users. Please select a single user.", true);
+        setUploadStatus(
+          "Upload is not allowed for multiple users. Please select a single user.",
+          true,
+        );
         return;
       }
 
@@ -1307,7 +1326,9 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
 
       const selectedForGpt = root.__coGetSelectedUserIds?.() || [];
       if (selectedForGpt.length > 1) {
-        setStatus("GPT Gen is not allowed for multiple users. Please select a single user.");
+        setStatus(
+          "GPT Gen is not allowed for multiple users. Please select a single user.",
+        );
         return;
       }
 
@@ -1320,10 +1341,14 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       els.gpt_gen.disabled = true;
       els.gpt_gen.textContent = "Waiting for GPT...";
 
-      const gptUrl = (els.gpt_url.value || "").trim();
       const resp = await chrome.runtime.sendMessage({
         type: "CO_GPT_OPEN",
-        payload: { company, position, jd: jdWithNote, gptUrl },
+        payload: {
+          company,
+          position,
+          jd: jdWithNote,
+          gptUrl: "https://chatgpt.com/",
+        },
       });
 
       if (!resp?.ok) {
@@ -1333,9 +1358,74 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       }
     });
 
+    // COVER LETTER
+    els.gpt_cover_letter?.addEventListener("click", async () => {
+      const company = (els.company.value || "").trim();
+      const position = (els.position.value || "").trim();
+      const jd = (els.jd.value || "").trim();
+      const resumeJson = (els.resume_json.value || "").trim();
+
+      if (!company || !position) {
+        setStatus("Company and Position are required for Cover Letter.");
+        return;
+      }
+      if (!resumeJson) {
+        setStatus(
+          "Resume JSON is required for Cover Letter. Run GPT Gen first.",
+        );
+        return;
+      }
+
+      const coverLetterPrompt =
+        `Write a cover letter for the position of ${position} in ${company}, which begins with a powerful idea instead of 'I'm applying for...'\n` +
+        `It connects my specific experience to the company's exact needs and builds trust. Keep the text below 200 words. My experience:${resumeJson}. Job description:${jd}`;
+
+      setStatus("Opening ChatGPT... waiting for cover letter response.");
+      els.gpt_cover_letter.disabled = true;
+      els.gpt_cover_letter.textContent = "Waiting for GPT...";
+
+      const gptUrl = (els.gpt_url.value || "").trim();
+      const resp = await chrome.runtime.sendMessage({
+        type: "CO_GPT_OPEN",
+        payload: {
+          company,
+          position,
+          jd,
+          gptUrl,
+          prompt: coverLetterPrompt,
+          mode: "cover_letter",
+        },
+      });
+
+      if (!resp?.ok) {
+        setStatus(`Failed to open ChatGPT: ${resp?.error || "Unknown error"}`);
+        els.gpt_cover_letter.disabled = false;
+        els.gpt_cover_letter.textContent = "C Letter";
+      }
+    });
+
     // Listener for GPT response relayed from background.js
     const _coGptMessageListener = (msg) => {
       if (!msg || msg.type !== "CO_GPT_RESULT") return false;
+
+      const mode = msg.mode || "resume";
+
+      if (mode === "cover_letter") {
+        els.gpt_cover_letter.disabled = false;
+        els.gpt_cover_letter.textContent = "C Letter";
+        if (msg.error) {
+          setStatus(`GPT error: ${msg.error}`);
+          return false;
+        }
+        const text = (msg.text || "").trim();
+        if (!text) {
+          setStatus("GPT returned empty cover letter.");
+          return false;
+        }
+        els.cover_letter.value = text;
+        setStatus("Cover letter generated.");
+        return false;
+      }
 
       els.gpt_gen.disabled = false;
       els.gpt_gen.textContent = "GPT Gen";

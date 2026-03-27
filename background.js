@@ -433,7 +433,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // 5) Open ChatGPT tab for GPT-assisted generation
       // payload: { company, position, jd }
       if (msg.type === "CO_GPT_OPEN") {
-        const { company, position, jd, gptUrl } = msg.payload || {};
+        const { company, position, jd, gptUrl, prompt, mode } = msg.payload || {};
         const originTabId = sender.tab?.id;
 
         if (!company || !position) {
@@ -447,7 +447,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
 
         await chrome.storage.local.set({
-          gptJob: { company, position, jd: jd || "", originTabId, consumed: false },
+          gptJob: { company, position, jd: jd || "", originTabId, consumed: false, prompt: prompt || null, mode: mode || "resume" },
         });
 
         chrome.tabs.create({ url: gptUrl });
@@ -468,6 +468,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               type: "CO_GPT_RESULT",
               text: msg.payload?.text || null,
               error: msg.payload?.error || null,
+              mode: stored.gptJob?.mode || "resume",
             })
             .catch(() => {});
         }
