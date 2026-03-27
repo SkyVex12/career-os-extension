@@ -482,6 +482,28 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       }
 
+      // 7) Fetch a backend file with auth and return base64 — used for "Fill Upload Field"
+      if (msg.type === "CO_FETCH_FILE") {
+        const { url } = msg.payload || {};
+        if (!url) {
+          sendResponse({ ok: false, error: "Missing url" });
+          return;
+        }
+        const cfg = await getConfig();
+        const headers = new Headers();
+        if (cfg.authToken) headers.set("X-Auth-Token", cfg.authToken);
+        const res = await fetch(url, { headers });
+        if (!res.ok) {
+          sendResponse({ ok: false, error: `HTTP ${res.status}` });
+          return;
+        }
+        const ab = await res.arrayBuffer();
+        const b64 = uint8ToBase64(new Uint8Array(ab));
+        const ct = res.headers.get("content-type") || "application/octet-stream";
+        sendResponse({ ok: true, b64, contentType: ct });
+        return;
+      }
+
       // Unknown message type: ignore
     } catch (e) {
       sendResponse({ ok: false, status: 0, error: String(e) });

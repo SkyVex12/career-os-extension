@@ -589,16 +589,18 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
           </div>
 
           <div id="co_app_view" style="display:none;">
-            <label>Users</label>
+            <button class="co-section-toggle" id="co_users_toggle" type="button">▾ Users</button>
             <div class="co-userpicker" id="co_userpicker">
-              <div class="co-userpicker-top">
-                <input id="co_user_search" class="co-user-search" placeholder="Search users..." />
-                <button id="co_user_select_all" class="co-user-ghost" type="button">All users</button>
-                <button id="co_user_clear" class="co-user-ghost" type="button">Clear</button>
-              </div>
               <div id="co_user_chips" class="co-user-chips"></div>
-              <div id="co_user_list" class="co-user-list"></div>
-              <div class="co-muted" style="margin-top:6px;">Applied hint is on the right of the user ID line. Hover user id to see full id.</div>
+              <div id="co_users_expandable" style="display:none;">
+                <div class="co-userpicker-top">
+                  <input id="co_user_search" class="co-user-search" placeholder="Search users..." />
+                  <button id="co_user_select_all" class="co-user-ghost" type="button">All users</button>
+                  <button id="co_user_clear" class="co-user-ghost" type="button">Clear</button>
+                </div>
+                <div id="co_user_list" class="co-user-list"></div>
+                <div class="co-muted" style="margin-top:6px;">Applied hint is on the right of the user ID line. Hover user id to see full id.</div>
+              </div>
             </div>
             <label>Source site</label>
             <input id="co_source_site" placeholder="indeed" />
@@ -635,7 +637,12 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
               <button class="co-action" id="co_gpt_cover_letter" type="button" style="background:#0891b2;">C Letter</button>
               <button class="co-action" id="co_save" type="button">Save</button>
             </div>
-            <button class="co-action secondary" id="co_logout" type="button">Logout</button>
+            <button class="co-action" id="co_fill_upload" type="button" style="background:#b45309;">Fill Upload Field</button>
+            <div id="co_resume_picker" style="display:none; margin-top:4px; border:1px solid #b45309; border-radius:6px; padding:6px;">
+              <div class="co-muted" style="margin-bottom:4px;">Select resume to fill:</div>
+              <div id="co_resume_picker_list"></div>
+              <button class="co-action secondary" id="co_resume_picker_cancel" type="button" style="margin-top:4px; width:100%;">Cancel</button>
+            </div>
 
             <button class="co-section-toggle" id="co_upload_toggle" type="button">▾ Upload Tailored Resume</button>
             <div id="co_upload_section" class="co-upload-section" style="display:none;">
@@ -649,6 +656,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
 
             <div class="co-muted">First time: set base resume via backend PUT /v1/users/{user_id}/base-resume</div>
             <div class="co-status" id="co_status"></div>
+            <button class="co-action secondary" id="co_logout" type="button">Logout</button>
           </div>
         </div>
       </div>
@@ -726,6 +734,13 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       gpt_cover_letter: root.querySelector("#co_gpt_cover_letter"),
       save: root.querySelector("#co_save"),
       logout: root.querySelector("#co_logout"),
+      fill_upload: root.querySelector("#co_fill_upload"),
+      resume_picker: root.querySelector("#co_resume_picker"),
+      resume_picker_list: root.querySelector("#co_resume_picker_list"),
+      resume_picker_cancel: root.querySelector("#co_resume_picker_cancel"),
+
+      users_toggle: root.querySelector("#co_users_toggle"),
+      users_expandable: root.querySelector("#co_users_expandable"),
 
       upload_toggle: root.querySelector("#co_upload_toggle"),
       upload_section: root.querySelector("#co_upload_section"),
@@ -941,6 +956,12 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
     });
 
     // UPLOAD TOGGLE
+    els.users_toggle?.addEventListener("click", () => {
+      const visible = els.users_expandable.style.display !== "none";
+      els.users_expandable.style.display = visible ? "none" : "block";
+      els.users_toggle.textContent = visible ? "▾ Users" : "▴ Users";
+    });
+
     els.upload_toggle?.addEventListener("click", () => {
       const visible = els.upload_section.style.display !== "none";
       els.upload_section.style.display = visible ? "none" : "block";
@@ -1227,6 +1248,23 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
               }
             }
 
+            // Save resume info for "Fill Upload Field"
+            const _fillUrl =
+              resumeFormat === "pdf" && pdfUrlAbs
+                ? pdfUrlAbs
+                : docxUrlAbs || pdfUrlAbs;
+            const _fillMime =
+              _fillUrl === pdfUrlAbs && pdfUrlAbs
+                ? "application/pdf"
+                : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+            const _fillExt = _fillMime === "application/pdf" ? "pdf" : "docx";
+            await saveResumeEntry({
+              label: `${position} @ ${company}`,
+              url: _fillUrl,
+              mime: _fillMime,
+              filename: `resume.${_fillExt}`,
+            });
+
             okCount++;
             continue;
           }
@@ -1240,6 +1278,14 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
               failures.push({ uid, status: "download_failed" });
               continue;
             }
+
+            // Save resume info for "Fill Upload Field" (base64 path — store b64 directly since blob URLs expire)
+            await saveResumeEntry({
+              label: `${position} @ ${company}`,
+              b64: data.resume_docx_base64,
+              mime,
+              filename: "resume.docx",
+            });
 
             okCount++;
             continue;
@@ -1347,7 +1393,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
           company,
           position,
           jd: jdWithNote,
-          gptUrl: "https://chatgpt.com/",
+          gptUrl: (els.gpt_url.value || "").trim(),
         },
       });
 
@@ -1356,6 +1402,157 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         els.gpt_gen.disabled = false;
         els.gpt_gen.textContent = "GPT Gen";
       }
+    });
+
+    // Helper: save a resume entry to storage (keyed by label, max 20 entries)
+    async function saveResumeEntry({ label, url, b64, mime, filename }) {
+      const stored = await chrome.storage.local.get(["savedResumes"]);
+      const list = Array.isArray(stored.savedResumes)
+        ? stored.savedResumes
+        : [];
+      const filtered = list.filter((r) => r.label !== label); // replace if same label
+      filtered.push({
+        label,
+        url: url || null,
+        b64: b64 || null,
+        mime,
+        filename,
+      });
+      await chrome.storage.local.set({ savedResumes: filtered.slice(-20) });
+    }
+
+    // Helper: fetch bytes for a saved resume entry
+    async function fetchResumeBytes(info) {
+      if (info.b64) {
+        const raw = atob(info.b64);
+        const bytes = new Uint8Array(raw.length);
+        for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+        return { bytes, mime: info.mime };
+      }
+      const resp = await chrome.runtime.sendMessage({
+        type: "CO_FETCH_FILE",
+        payload: { url: info.url },
+      });
+      if (!resp?.ok) throw new Error(resp?.error || "Fetch failed");
+      const raw = atob(resp.b64);
+      const bytes = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+      return { bytes, mime: resp.contentType || info.mime };
+    }
+
+    // Helper: inject a resume File into the page's file input
+    async function injectResumeToPage(info) {
+      const fileInputs = Array.from(
+        document.querySelectorAll('input[type="file"]'),
+      );
+      const target =
+        fileInputs.find((el) => {
+          const accept = (el.accept || "").toLowerCase();
+          return !accept || /pdf|doc|docx|word|application/.test(accept);
+        }) || fileInputs[0];
+
+      if (!target) {
+        setStatus("No file upload field found on this page.");
+        return false;
+      }
+
+      els.fill_upload.disabled = true;
+      els.fill_upload.textContent = "Filling...";
+
+      let bytes, mime;
+      try {
+        ({ bytes, mime } = await fetchResumeBytes(info));
+      } catch (e) {
+        setStatus(`Failed to fetch resume: ${e.message}`);
+        els.fill_upload.disabled = false;
+        els.fill_upload.textContent = "Fill Upload Field";
+        return false;
+      }
+
+      const file = new File([bytes], info.filename, { type: mime });
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "files",
+      ).set;
+      nativeSetter.call(target, dt.files);
+      target.dispatchEvent(new Event("input", { bubbles: true }));
+      target.dispatchEvent(new Event("change", { bubbles: true }));
+
+      setStatus(`✅ "${info.label}" injected into upload field.`);
+      els.fill_upload.disabled = false;
+      els.fill_upload.textContent = "Fill Upload Field";
+      return true;
+    }
+
+    // FILL UPLOAD FIELD
+    els.fill_upload?.addEventListener("click", async () => {
+      // Hide picker if already open (toggle)
+      if (els.resume_picker.style.display !== "none") {
+        els.resume_picker.style.display = "none";
+        return;
+      }
+
+      const stored = await chrome.storage.local.get(["savedResumes"]);
+      const list = Array.isArray(stored.savedResumes)
+        ? stored.savedResumes
+        : [];
+
+      if (!list.length) {
+        setStatus("No saved resumes. Generate a resume first.");
+        return;
+      }
+
+      if (list.length === 1) {
+        await injectResumeToPage(list[0]);
+        await chrome.storage.local.set({ savedResumes: [] });
+        return;
+      }
+
+      // Multiple — show picker
+      els.resume_picker_list.innerHTML = "";
+      list.forEach((info, idx) => {
+        const row = document.createElement("div");
+        row.style.cssText = "display:flex; gap:4px; margin-bottom:4px;";
+
+        const btn = document.createElement("button");
+        btn.className = "co-action";
+        btn.style.cssText = "flex:1; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0;";
+        btn.textContent = info.label;
+        btn.title = info.label;
+        btn.addEventListener("click", async () => {
+          els.resume_picker.style.display = "none";
+          const ok = await injectResumeToPage(info);
+          if (ok) {
+            const updated = list.filter((_, i) => i !== idx);
+            await chrome.storage.local.set({ savedResumes: updated });
+          }
+        });
+
+        const removeBtn = document.createElement("button");
+        removeBtn.className = "co-action secondary";
+        removeBtn.style.cssText = "flex:none; width:18px; height:18px; padding:0; font-size:11px; line-height:18px; text-align:center; align-self:center; min-width:unset;";
+        removeBtn.textContent = "×";
+        removeBtn.title = "Remove";
+        removeBtn.addEventListener("click", async () => {
+          const updated = list.filter((_, i) => i !== idx);
+          await chrome.storage.local.set({ savedResumes: updated });
+          row.remove();
+          if (!els.resume_picker_list.children.length) {
+            els.resume_picker.style.display = "none";
+          }
+        });
+
+        row.appendChild(btn);
+        row.appendChild(removeBtn);
+        els.resume_picker_list.appendChild(row);
+      });
+      els.resume_picker.style.display = "";
+    });
+
+    els.resume_picker_cancel?.addEventListener("click", () => {
+      els.resume_picker.style.display = "none";
     });
 
     // COVER LETTER
