@@ -5,7 +5,8 @@
   "description": "Auto-open CareerOS panel on job pages; resilient to SPA re-renders.",
   "permissions": [
     "downloads",
-    "storage"
+    "storage",
+    "tabs"
   ],
   "host_permissions": [
     "https://career-os.onrender.com/*",
@@ -14,7 +15,11 @@
     "http://127.0.0.1/*",
     "http://localhost/*",
     "http://0.0.0.0/*",
-    "https://chatgpt.com/*"
+    "https://chatgpt.com/*",
+    "https://remotive.com/*",
+    "https://ats.rippling.com/*",
+    "https://workforcenow.adp.com/*",
+    "https://*.workable.com/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -36,6 +41,15 @@
       ],
       "js": [
         "chatgpt-bridge.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://remotive.com/*"
+      ],
+      "js": [
+        "remotive.js"
       ],
       "run_at": "document_idle"
     }

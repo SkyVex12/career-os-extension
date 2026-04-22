@@ -124,6 +124,27 @@ async function sendResult(payload) {
       );
     }
 
+    // Wait for text to stabilise — used both after stop button disappears and as fallback
+    async function waitForStableText() {
+      await sleep(800);
+      const allMsgs = document.querySelectorAll("[data-message-author-role='assistant']");
+      const lastMsg = allMsgs[allMsgs.length - 1];
+      if (!lastMsg) return;
+      let prevText = (lastMsg.innerText || "").trim();
+      let stableCount = 0;
+      const stableDeadline = Date.now() + 60_000;
+      while (stableCount < 4 && Date.now() < stableDeadline) {
+        await sleep(700);
+        const nowText = (lastMsg.innerText || "").trim();
+        if (nowText === prevText && nowText.length > 10) {
+          stableCount++;
+        } else {
+          stableCount = 0;
+          prevText = nowText;
+        }
+      }
+    }
+
     // Poll for generation to complete (max 3 minutes)
     const timeout = 180_000;
     const startTime = Date.now();
@@ -137,15 +158,18 @@ async function sendResult(payload) {
       if (stopBtn) {
         generationStarted = true;
       } else if (generationStarted) {
-        // Stop button disappeared — generation finished
-        await sleep(1200); // wait for final render
+        // Stop button disappeared — wait for full render to stabilise
+        await waitForStableText();
         break;
       } else if (Date.now() - startTime > 8000) {
-        // Never saw a stop button after 8s — check if a new message appeared anyway
+        // Never saw a stop button — check if a new message appeared and stabilised
         const current = document.querySelectorAll(
           "[data-message-author-role='assistant']"
         ).length;
-        if (current > baseline) break;
+        if (current > baseline) {
+          await waitForStableText();
+          break;
+        }
       }
 
       await sleep(600);
@@ -172,7 +196,7 @@ async function sendResult(payload) {
       return;
     }
 
-    await sendResult({ text: responseText });
+    await sendResult({ text: responseText, conversationUrl: window.location.href });
   } catch (e) {
     await sendResult({ error: `Bridge error: ${String(e)}` });
   }

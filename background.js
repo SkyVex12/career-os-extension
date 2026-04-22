@@ -10,6 +10,12 @@ const DEFAULT_BACKEND = "https://career-os.onrender.com";
 const CHATGPT_GPT_URL =
   "https://chatgpt.com/g/g-69bae439336881919d76677f0f547cf4-resume-builder/c/69baf345-f5c8-832a-abf0-24646d3ac559";
 
+// In-flight guards prevent duplicate tab creation when the same message arrives
+// twice before storage has been updated.
+let gptOpenInFlight = false;
+let automationStartInFlight = false;
+let automationNextInFlight = false;
+
 async function getConfig() {
   const { backend, authToken } = await chrome.storage.local.get([
     "backend",
@@ -380,6 +386,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       }
 
+      // 4a) Generate cover letter DOCX and return as base64 (for file injection)
+      if (msg.type === "CO_COVER_LETTER_DOCX_B64") {
+        const { text } = msg.payload || {};
+        const cl = String(text || "").trim();
+        if (!cl) { sendResponse({ ok: false, error: "Empty text" }); return; }
+        const docxBytes = coverLetterToDocxBytes(cl);
+        sendResponse({ ok: true, b64: uint8ToBase64(docxBytes) });
+        return;
+      }
+
       // 4) Generate cover letter DOCX and download
       if (msg.type === "CO_DOWNLOAD_COVER_LETTER_DOCX") {
         const { text, filename, saveAs } = msg.payload || {};
@@ -433,7 +449,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // 5) Open ChatGPT tab for GPT-assisted generation
       // payload: { company, position, jd }
       if (msg.type === "CO_GPT_OPEN") {
-        const { company, position, jd, gptUrl, prompt, mode } = msg.payload || {};
+        if (gptOpenInFlight) {
+          sendResponse({ ok: false, error: "GPT already in progress" });
+          return;
+        }
+        gptOpenInFlight = true;
+        try {
+        const { company, position, jd, gptUrl, prompt, mode, autoClose } = msg.payload || {};
         const originTabId = sender.tab?.id;
 
         if (!company || !position) {
@@ -446,18 +468,37 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return;
         }
 
-        await chrome.storage.local.set({
-          gptJob: { company, position, jd: jd || "", originTabId, consumed: false, prompt: prompt || null, mode: mode || "resume" },
-        });
+        // Deduplicate: if a GPT tab is already open and not yet consumed, reject duplicate
+        const prevJob = (await chrome.storage.local.get(["gptJob"])).gptJob;
+        if (prevJob?.gptTabId && !prevJob?.consumed) {
+          // Verify the tab still exists
+          const tabExists = await chrome.tabs.get(prevJob.gptTabId).then(() => true).catch(() => false);
+          if (tabExists) {
+            sendResponse({ ok: false, error: "GPT already in progress" });
+            return;
+          }
+        }
 
-        chrome.tabs.create({ url: gptUrl });
+        // Close any stale GPT tab
+        if (prevJob?.gptTabId) {
+          chrome.tabs.remove(prevJob.gptTabId).catch(() => {});
+        }
+
+        const newJob = { company, position, jd: jd || "", originTabId, consumed: false, prompt: prompt || null, mode: mode || "resume", autoClose: !!autoClose, gptTabId: null };
+        await chrome.storage.local.set({ gptJob: newJob });
+
+        const gptTab = await chrome.tabs.create({ url: gptUrl, active: true });
+        await chrome.storage.local.set({ gptJob: { ...newJob, gptTabId: gptTab.id } });
 
         sendResponse({ ok: true });
         return;
+        } finally {
+          gptOpenInFlight = false;
+        }
       }
 
       // 6) GPT response from chatgpt-bridge.js — relay to origin tab and optionally close GPT tab
-      // payload: { text } on success, { error } on failure
+      // payload: { text, conversationUrl } on success, { error } on failure
       if (msg.type === "CO_GPT_RESULT") {
         const stored = await chrome.storage.local.get(["gptJob", "close_gpt_tab"]);
         const originTabId = stored.gptJob?.originTabId;
@@ -469,13 +510,28 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               text: msg.payload?.text || null,
               error: msg.payload?.error || null,
               mode: stored.gptJob?.mode || "resume",
+              conversationUrl: msg.payload?.conversationUrl || null,
             })
             .catch(() => {});
         }
 
-        // Close the ChatGPT tab only if the user opted in
-        if (stored.close_gpt_tab && sender.tab?.id) {
-          chrome.tabs.remove(sender.tab.id).catch(() => {});
+        // Clear the active GPT tab marker before closing it so the next GPT step
+        // (for example cover letter right after resume) can start immediately.
+        if (stored.gptJob) {
+          await chrome.storage.local.set({
+            gptJob: {
+              ...stored.gptJob,
+              consumed: true,
+              gptTabId: null,
+            },
+          });
+        }
+
+        // Close the ChatGPT tab if user opted in OR if automation requested auto-close
+        const shouldClose = stored.gptJob?.autoClose || stored.close_gpt_tab;
+        const tabToClose = stored.gptJob?.gptTabId || sender.tab?.id;
+        if (shouldClose && tabToClose) {
+          chrome.tabs.remove(tabToClose).catch(() => {});
         }
 
         sendResponse({ ok: true });
@@ -501,6 +557,153 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const b64 = uint8ToBase64(new Uint8Array(ab));
         const ct = res.headers.get("content-type") || "application/octet-stream";
         sendResponse({ ok: true, b64, contentType: ct });
+        return;
+      }
+
+      // 8) Automation: start queue
+      if (msg.type === "AUTOMATION_START") {
+        if (automationStartInFlight) {
+          sendResponse({ ok: false, error: "Automation start already in progress" });
+          return;
+        }
+        automationStartInFlight = true;
+        try {
+        const { queue } = msg.payload || {};
+        if (!Array.isArray(queue) || !queue.length) {
+          sendResponse({ ok: false, error: "Empty queue" });
+          return;
+        }
+
+        // Resume from currentIndex if a stopped automation exists
+        const existing = (await chrome.storage.local.get(["automation"])).automation;
+        const canResume = existing && !existing.active && Array.isArray(existing.queue) && existing.queue.length > 0;
+
+        const resumeQueue = canResume ? existing.queue : queue;
+        const rawIndex = canResume ? (existing.currentIndex || 0) : 0;
+        // If index is past the end (previous run completed fully), start fresh
+        const resumeIndex = rawIndex < resumeQueue.length ? rawIndex : 0;
+        const resumeResults = (canResume && resumeIndex > 0) ? (existing.results || []) : [];
+        const startUrl = resumeQueue[resumeIndex].url;
+
+        // Write storage FIRST so the new tab reads active:true immediately on load
+        await chrome.storage.local.set({
+          automation: {
+            active: true,
+            tabId: -1,
+            queue: resumeQueue,
+            currentIndex: resumeIndex,
+            results: resumeResults,
+          },
+          automationJobContext: null,
+        });
+
+        const tab = await chrome.tabs.create({ url: startUrl, active: true });
+
+        // Update with real tabId
+        await chrome.storage.local.set({
+          automation: {
+            active: true,
+            tabId: tab.id,
+            queue: resumeQueue,
+            currentIndex: resumeIndex,
+            results: resumeResults,
+          },
+        });
+
+        sendResponse({ ok: true, tabId: tab.id, resumedFrom: resumeIndex });
+        return;
+        } finally {
+          automationStartInFlight = false;
+        }
+      }
+
+      // 9) Automation: advance to next job
+      if (msg.type === "AUTOMATION_NEXT") {
+        if (automationNextInFlight) {
+          sendResponse({ ok: true, ignored: true, reason: "advance already in progress" });
+          return;
+        }
+        automationNextInFlight = true;
+        try {
+        const { status, reason } = msg.payload || {};
+        const stored = await chrome.storage.local.get(["automation"]);
+        const automation = stored.automation;
+
+        if (!automation) {
+          sendResponse({ ok: false, error: "No automation state" });
+          return;
+        }
+
+        const senderTabId = sender.tab?.id;
+        if (automation.tabId && senderTabId && automation.tabId !== senderTabId) {
+          sendResponse({ ok: true, ignored: true, reason: "stale automation tab" });
+          return;
+        }
+
+        const results = [...(automation.results || [])];
+        const queue = automation.queue || [];
+        const currentIndex = automation.currentIndex || 0;
+
+        results.push({
+          url: queue[currentIndex]?.url || "",
+          status: status || "applied",
+          reason: reason || null,
+        });
+
+        const nextIndex = currentIndex + 1;
+
+        if (nextIndex >= queue.length) {
+          await chrome.storage.local.set({
+            automation: { ...automation, active: false, currentIndex: nextIndex, results },
+            automationJobContext: null,
+          });
+          sendResponse({ ok: true, done: true });
+          return;
+        }
+
+        // Open next job in a new tab — keep current tab open (applied confirmation or manual)
+        const nextTab = await chrome.tabs.create({ url: queue[nextIndex].url, active: true });
+
+        await chrome.storage.local.set({
+          automation: { ...automation, active: true, tabId: nextTab.id, currentIndex: nextIndex, results },
+          automationJobContext: null,
+        });
+
+        sendResponse({ ok: true });
+        return;
+        } finally {
+          automationNextInFlight = false;
+        }
+      }
+
+      // 10) Automation: stop
+      if (msg.type === "AUTOMATION_STOP") {
+        const stored = await chrome.storage.local.get(["automation"]);
+        if (stored.automation) {
+          await chrome.storage.local.set({
+            automation: { ...stored.automation, active: false },
+          });
+        }
+        sendResponse({ ok: true });
+        return;
+      }
+
+      // 11) Automation: status query
+      if (msg.type === "AUTOMATION_STATUS") {
+        const stored = await chrome.storage.local.get(["automation"]);
+        sendResponse(stored.automation || { active: false });
+        return;
+      }
+
+      // 12) Automation: navigate the automation tab to an external URL
+      if (msg.type === "AUTOMATION_NAVIGATE") {
+        const { url } = msg.payload || {};
+        if (!url) { sendResponse({ ok: false, error: "Missing url" }); return; }
+        const stored = await chrome.storage.local.get(["automation"]);
+        const tabId = stored.automation?.tabId;
+        if (!tabId) { sendResponse({ ok: false, error: "No automation tab" }); return; }
+        await chrome.tabs.update(tabId, { url });
+        sendResponse({ ok: true });
         return;
       }
 

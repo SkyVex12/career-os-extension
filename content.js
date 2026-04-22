@@ -1607,6 +1607,16 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
 
       const mode = msg.mode || "resume";
 
+      // Automation modes are handled by remotive.js (on detail page)
+      // or by the standalone automation autofill module (on external boards).
+      if (
+        mode === "automation_resume" ||
+        mode === "automation_cover_letter" ||
+        mode === "qa"
+      ) {
+        return false;
+      }
+
       if (mode === "cover_letter") {
         els.gpt_cover_letter.disabled = false;
         els.gpt_cover_letter.textContent = "C Letter";
@@ -1762,3 +1772,1589 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
 
   mountPanel();
 })();
+
+// ============================================================
+// Automation autofill — runs on external job boards
+// ============================================================
+(async function coAutomationAutofill() {
+  "use strict";
+
+  // Only run in the top frame — content.js is injected with all_frames: true
+  const isTopFrame = (() => {
+    try {
+      return window.top === window;
+    } catch (_) {
+      return false;
+    }
+  })();
+
+  const isEmbeddedGreenhouseFrame =
+    /greenhouse\.io|job-boards\.greenhouse/.test(location.hostname) &&
+    /\/(?:embed\/)?job_app\b/i.test(location.pathname + location.search);
+
+  const isEmbeddedAdpFrame =
+    location.hostname.includes("workforcenow.adp.com") &&
+    /recruitment\.html\b/i.test(location.pathname + location.search);
+
+  if (!isTopFrame && !isEmbeddedGreenhouseFrame && !isEmbeddedAdpFrame) return;
+
+  if (location.hostname.includes("remotive.com")) return;
+
+  if (
+    isTopFrame &&
+    document.querySelector(
+      'iframe[src*="job-boards.greenhouse.io/embed/job_app"], iframe[src*="greenhouse.io/embed/job_app"]',
+    )
+  ) {
+    console.log("[CareerOS] Embedded Greenhouse iframe detected; waiting for iframe automation.");
+    return;
+  }
+
+  if (
+    isTopFrame &&
+    !isEmbeddedAdpFrame &&
+    document.querySelector(
+      'iframe[src*="workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html"], iframe[src*="recruitment/recruitment.html"]',
+    )
+  ) {
+    console.log("[CareerOS] Embedded ADP iframe detected; waiting for iframe automation.");
+    return;
+  }
+
+  // Per-page execution lock to prevent duplicate runs (SPA re-injection, etc.)
+  if (window.__co_autofill_running) return;
+  window.__co_autofill_running = true;
+
+  // One-shot guard so AUTOMATION_NEXT can only fire once per page load
+  let __co_next_sent = false;
+  async function sendNext(payload) {
+    if (__co_next_sent) return;
+    __co_next_sent = true;
+    try {
+      await chrome.runtime.sendMessage({ type: "AUTOMATION_NEXT", payload });
+    } catch (_) {}
+  }
+
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+  function isPanel(el) { return !!el.closest("#careeros-panel-root"); }
+  function isVis(el) {
+    if (!el) return false;
+    const s = window.getComputedStyle(el);
+    if (s.display === "none" || s.visibility === "hidden") return false;
+    // offsetParent is null for fixed/sticky elements, <dialog>, and <body>/<html>
+    // — check position and dialog ancestry before concluding hidden
+    if (el.offsetParent === null) {
+      if (s.position === "fixed" || s.position === "sticky") return true;
+      if (el.closest("dialog[open]")) return true;
+      if (el.tagName === "BODY" || el.tagName === "HTML") return true;
+      return false;
+    }
+    return true;
+  }
+
+  // ---- Shadow DOM helpers ----
+  function queryShadowAll(root, selector) {
+    const results = Array.from(root.querySelectorAll?.(selector) || []);
+    for (const el of (root.querySelectorAll?.("*") || [])) {
+      if (el.shadowRoot) results.push(...queryShadowAll(el.shadowRoot, selector));
+    }
+    return results;
+  }
+
+  // ---- Shared helpers ----
+
+  function nativeFill(el, value) {
+    if (!value && value !== 0) return;
+    const tag = el.tagName;
+    const proto = tag === "TEXTAREA" ? HTMLTextAreaElement.prototype
+                : tag === "SELECT"   ? HTMLSelectElement.prototype
+                : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+    if (setter) setter.call(el, String(value));
+    else el.value = String(value);
+    el.dispatchEvent(new Event("input",  { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  // Set a <select> by matching option text (case-insensitive partial match)
+  function selectByText(el, text) {
+    const t = String(text).toLowerCase().trim();
+    const opt = Array.from(el.options).find(o =>
+      o.text.toLowerCase().includes(t) || o.value.toLowerCase().includes(t)
+    );
+    if (opt) { nativeFill(el, opt.value); return true; }
+    return false;
+  }
+
+  // Click a radio/checkbox by matching its label text
+  function clickRadioByText(name, text) {
+    const t = String(text).toLowerCase().trim();
+    const inputs = Array.from(document.querySelectorAll(`input[type="radio"][name="${name}"], input[type="checkbox"][name="${name}"]`));
+    const target = inputs.find(inp => {
+      const lbl = document.querySelector(`label[for="${inp.id}"]`);
+      const lblText = (lbl?.textContent || inp.value || "").toLowerCase();
+      return lblText.includes(t);
+    });
+    if (target && !target.checked) { target.click(); return true; }
+    return false;
+  }
+
+  // Rippling custom-select fill: open dropdown, type to filter, click matching option
+  function waitForOptions(timeoutMs = 3000) {
+    return new Promise(resolve => {
+      const check = () => {
+        const opts = Array.from(document.querySelectorAll('[role="option"]'));
+        if (opts.length) return opts;
+        return null;
+      };
+      const found = check();
+      if (found) return resolve(found);
+      const obs = new MutationObserver(() => {
+        const opts = check();
+        if (opts) { obs.disconnect(); clearTimeout(timer); resolve(opts); }
+      });
+      obs.observe(document.body, { childList: true, subtree: true });
+      const timer = setTimeout(() => { obs.disconnect(); resolve([]); }, timeoutMs);
+    });
+  }
+
+  function fireClick(el) {
+    el.dispatchEvent(new PointerEvent("pointerover",  { bubbles: true, cancelable: true }));
+    el.dispatchEvent(new MouseEvent("mouseenter",     { bubbles: true }));
+    el.dispatchEvent(new PointerEvent("pointerdown",  { bubbles: true, cancelable: true, view: window }));
+    el.dispatchEvent(new MouseEvent("mousedown",      { bubbles: true, cancelable: true, view: window }));
+    el.dispatchEvent(new PointerEvent("pointerup",    { bubbles: true, cancelable: true, view: window }));
+    el.dispatchEvent(new MouseEvent("mouseup",        { bubbles: true, cancelable: true, view: window }));
+    el.dispatchEvent(new MouseEvent("click",          { bubbles: true, cancelable: true, view: window }));
+  }
+
+  async function ripplingWaitClosed(timeoutMs = 1500) {
+    const t = Date.now();
+    while (Date.now() - t < timeoutMs) {
+      if (!document.querySelector('[role="option"]')) return true;
+      await sleep(80);
+    }
+    return false;
+  }
+
+  async function ripplingOpenDropdown(controller) {
+    // Close any stale open dropdown first
+    if (document.querySelector('[role="option"]')) {
+      document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27, bubbles: true }));
+      document.body.click();
+      await ripplingWaitClosed(1000);
+    }
+
+    const searchInput = controller.querySelector('input[data-testid="input-select-search-input"]');
+    const combobox = controller.querySelector('[role="combobox"]');
+
+    if (searchInput && isVis(searchInput)) {
+      fireClick(searchInput);
+      searchInput.focus();
+    } else if (combobox) {
+      combobox.focus();
+      await sleep(50);
+      fireClick(combobox);
+    }
+  }
+
+  async function ripplingSelectFill(controller, answer) {
+    if (!controller || !answer) return;
+    const t = answer.toLowerCase().trim();
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await ripplingOpenDropdown(controller);
+
+      const opts = await waitForOptions(3000);
+      if (!opts.length) {
+        console.warn("[CareerOS] No options appeared for answer:", answer);
+        return;
+      }
+
+      const match =
+        opts.find(o => o.textContent.trim().toLowerCase() === t) ||
+        opts.find(o => o.textContent.trim().toLowerCase().includes(t)) ||
+        opts.find(o => t.includes(o.textContent.trim().toLowerCase()));
+
+      if (!match) {
+        console.warn("[CareerOS] No option matched:", answer, "| available:", opts.map(o => o.textContent.trim()));
+        document.body.click();
+        return;
+      }
+
+      // Click the option — try the element and its text child
+      fireClick(match);
+      const inner = match.querySelector("p,span") || match.firstElementChild;
+      if (inner) fireClick(inner);
+
+      // Verify: dropdown should close after selection
+      const closed = await ripplingWaitClosed(1000);
+      if (closed) {
+        console.log(`[CareerOS] Selected "${match.textContent.trim()}" for answer "${answer}" (attempt ${attempt + 1})`);
+        return;
+      }
+
+      console.warn(`[CareerOS] Dropdown still open after attempt ${attempt + 1}, retrying...`);
+      // Escape to close before retry
+      document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27, bubbles: true }));
+      await ripplingWaitClosed(800);
+    }
+  }
+
+  async function fetchResumeBytes(fileInfo) {
+    const resp = await chrome.runtime.sendMessage({ type: "CO_FETCH_FILE", payload: { url: fileInfo.url } });
+    if (!resp?.ok) throw new Error(resp?.error || "Fetch failed");
+    const raw = atob(resp.b64);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    return { bytes, mime: resp.contentType || fileInfo.mime };
+  }
+
+  async function injectFileIntoInput(input, fileInfo) {
+    const { bytes, mime } = await fetchResumeBytes(fileInfo);
+    const file = new File([bytes], fileInfo.filename, { type: mime });
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "files").set;
+    setter.call(input, dt.files);
+    input.dispatchEvent(new Event("input",  { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    return true;
+  }
+
+  function waitForGptResult(mode, timeoutMs = 240000) {
+    return new Promise(resolve => {
+      const listener = msg => {
+        if (!msg || msg.type !== "CO_GPT_RESULT" || msg.mode !== mode) return false;
+        chrome.runtime.onMessage.removeListener(listener);
+        clearTimeout(timer);
+        resolve(msg);
+        return false;
+      };
+      chrome.runtime.onMessage.addListener(listener);
+      const timer = setTimeout(() => {
+        chrome.runtime.onMessage.removeListener(listener);
+        resolve({ timeout: true });
+      }, timeoutMs);
+    });
+  }
+
+  async function askGpt(ctx, prompt, mode) {
+    const resultPromise = waitForGptResult(mode);
+    let resp = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      resp = await chrome.runtime.sendMessage({
+        type: "CO_GPT_OPEN",
+        payload: { company: ctx.company, position: ctx.position, jd: "", gptUrl: ctx.conversationUrl, prompt, mode, autoClose: true },
+      });
+      if (resp?.ok) break;
+      if (resp?.error === "GPT already in progress") {
+        await sleep(2000);
+        continue;
+      }
+      break;
+    }
+    if (!resp?.ok) return null;
+    const result = await resultPromise;
+    if (result.timeout || result.error) return null;
+    return (result.text || "").trim();
+  }
+
+  function parseQaResponse(text, count) {
+    const answers = [];
+    for (let i = 1; i <= count; i++) {
+      const re = new RegExp(`A${i}:\\s*([\\s\\S]*?)(?=A${i + 1}:|$)`, "i");
+      const m = text.match(re);
+      answers.push(m ? m[1].trim() : "");
+    }
+    return answers;
+  }
+
+  async function waitForFormSignals(timeoutMs = 15000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const visibleFields = Array.from(
+        document.querySelectorAll(
+          'input:not([type="hidden"]), textarea, select, button[type="submit"], input[type="file"]',
+        ),
+      ).filter((el) => !isPanel(el) && isVis(el));
+      if (visibleFields.length) return true;
+      await sleep(500);
+    }
+    return false;
+  }
+
+  function hasVisibleApplicationSignals() {
+    const visibleResumeInput = Array.from(document.querySelectorAll('input[type="file"]'))
+      .some((el) => !isPanel(el) && isVis(el));
+
+    if (visibleResumeInput) return true;
+
+    const visibleQuestionFields = Array.from(
+      document.querySelectorAll('textarea, select, input[type="tel"], input[type="url"], input[type="number"]'),
+    ).some((el) => !isPanel(el) && isVis(el));
+
+    if (visibleQuestionFields) return true;
+
+    const visibleAppTextInputs = Array.from(
+      document.querySelectorAll('input[type="text"], input[type="email"]'),
+    ).filter((el) => !isPanel(el) && isVis(el));
+
+    if (visibleAppTextInputs.some((el) => !isLikelyNonApplicationField(el))) return true;
+
+    const actionBtn = findVisibleButtonByText(
+      /\b(apply|submit application|continue application|continue to application|review application|save and continue)\b/,
+    );
+    return !!actionBtn;
+  }
+
+  function isLikelyLoginPage() {
+    const hasApplicationSignals = hasVisibleApplicationSignals();
+    const hasPassword = !!document.querySelector('input[type="password"]');
+    if (hasPassword && !hasApplicationSignals) return true;
+
+    const hasLoginInputs =
+      !!document.querySelector(
+        'input[name*="user" i], input[name*="login" i], input[name*="sign" i], input[autocomplete="username"], input[autocomplete="current-password"]',
+      );
+    const hasAuthButtons =
+      !!findVisibleButtonByText(/\bsign in\b|\blog in\b|\bcontinue with email\b|\bcreate account\b/);
+    if (hasLoginInputs && hasAuthButtons && !hasApplicationSignals) return true;
+
+    const text = (document.body?.innerText || "").toLowerCase();
+    return (
+      !hasApplicationSignals &&
+      (text.includes("sign in") || text.includes("log in") || text.includes("login")) &&
+      (text.includes("password") || text.includes("email") || text.includes("username"))
+    );
+  }
+
+  function findVisibleButtonByText(pattern) {
+    return Array.from(document.querySelectorAll("button,a,[role='button'],input[type='button'],input[type='submit']"))
+      .find((el) => {
+        if (isPanel(el) || !isVis(el)) return false;
+        if (el.disabled || el.getAttribute("aria-disabled") === "true" || el.getAttribute("data-disabled") === "true") return false;
+        const text = (
+          el.textContent ||
+          el.value ||
+          el.getAttribute("aria-label") ||
+          ""
+        )
+          .trim()
+          .toLowerCase();
+        return pattern.test(text);
+      }) || null;
+  }
+
+  function findPrimaryActionButton() {
+    const submitBtn = Array.from(document.querySelectorAll(
+      'button[type="submit"], button[data-testid="Apply"], input[type="submit"]',
+    )).find(b => !b.disabled && b.getAttribute("data-disabled") !== "true" && !isPanel(b) && isVis(b));
+    if (submitBtn) return { button: submitBtn, kind: "submit" };
+
+    const nextBtn = findVisibleButtonByText(
+      /\b(next|continue|review|continue application|continue to application|submit application|apply)\b/,
+    );
+    if (nextBtn) return { button: nextBtn, kind: "progress" };
+
+    return { button: null, kind: "none" };
+  }
+
+  function isLikelyNonApplicationField(el, labelText = "") {
+    const text = [
+      labelText,
+      el?.name || "",
+      el?.id || "",
+      el?.placeholder || "",
+      el?.getAttribute?.("aria-label") || "",
+    ]
+      .join(" ")
+      .trim()
+      .toLowerCase();
+
+    if (!text) return false;
+    if (/\b(search|newsletter|coupon|discount|promo|gift card|giftcard|quantity|qty|cart)\b/.test(text)) {
+      return true;
+    }
+
+    const container = el.closest?.("header, footer, nav, [role='search'], #SearchModal, #CartDrawer, [id*='cart'], [class*='cart'], [class*='search'], [class*='newsletter']");
+    return !!container;
+  }
+
+  function findExternalApplicationUrl() {
+    const pageText = (document.body?.innerText || "").trim();
+    if (!pageText) return "";
+
+    const hasApplyCue = /\b(how to apply|applying process|application form|fill in this form|questionnaire|apply here)\b/i.test(pageText);
+    if (!hasApplyCue) return "";
+
+    const textUrls = pageText.match(/https?:\/\/[^\s<>"')]+/gi) || [];
+    const anchorUrls = Array.from(document.querySelectorAll("a[href]"))
+      .map((el) => el.href)
+      .filter(Boolean);
+
+    return [...textUrls, ...anchorUrls].find((rawUrl) => {
+      try {
+        const u = new URL(rawUrl, location.href);
+        return u.hostname && u.hostname !== location.hostname;
+      } catch (_) {
+        return false;
+      }
+    }) || "";
+  }
+
+  async function clickConsentAndContinueGates() {
+    const patterns = [
+      /\bi agree\b/,
+      /\bi accept\b/,
+      /\baccept\b/,
+      /\bconsent(?:\s+and\s+continue)?\b/,
+      /\bagree(?:\s+and\s+continue)?\b/,
+      /\bcontinue application\b/,
+      /\bcontinue to application\b/,
+      /\bproceed\b/,
+    ];
+
+    for (let pass = 0; pass < 4; pass++) {
+      if (await waitForFormSignals(250)) break;
+      if (isLikelyLoginPage()) break;
+      let clicked = false;
+      for (const pattern of patterns) {
+        const btn = findVisibleButtonByText(pattern);
+        if (!btn) continue;
+        fireClick(btn);
+        clicked = true;
+        await sleep(1500);
+        break;
+      }
+      if (!clicked) break;
+    }
+  }
+
+  async function waitForLoginCompletion(timeoutMs = 10 * 60 * 1000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      await clickConsentAndContinueGates();
+
+      if (!isLikelyLoginPage()) {
+        const ready = await waitForFormSignals(4000);
+        if (ready || !isLikelyLoginPage()) return true;
+      }
+
+      await sleep(1000);
+    }
+    return false;
+  }
+
+  // ---- Gate click (reveal hidden forms) ----
+
+  async function clickGateIfNeeded() {
+    const real = Array.from(document.querySelectorAll('input[type="text"],input[type="email"],input[type="tel"],textarea'))
+      .filter(el => !isPanel(el) && isVis(el));
+    if (real.length) return;
+    const btn = Array.from(document.querySelectorAll("button,a[role='button'],a")).find(el => {
+      if (isPanel(el)) return false;
+      const t = (el.textContent || "").trim().toLowerCase();
+      return /i'?m interested|apply now|apply for this|start application|begin application|^apply$/.test(t);
+    });
+    if (btn) { btn.click(); await sleep(3000); }
+    await clickConsentAndContinueGates();
+  }
+
+  // ---- Site handlers ----
+
+  // SmartRecruiters — reads __OC_CONTEXT__ via injected script (main world),
+  // finds inputs inside Shadow DOM (<spl-input>, <spl-dropzone> custom elements)
+  const SMARTRECRUITERS = {
+    detect: () => /smartrecruiters\.com|jobs\.smartrecruiters\.com/.test(location.hostname),
+
+    // SR is a multi-step Angular form: Resume → Personal Info → Screening Questions → Submit
+    // After injecting resume, we need to advance through steps until the screening section appears.
+    async advanceToScreeningQuestions() {
+      // Wait for SR to accept/process the uploaded resume (the dropzone updates)
+      await sleep(2000);
+
+      // Try clicking through form steps up to 8 times
+      for (let step = 0; step < 8; step++) {
+        // Check if screening questions are now visible in the DOM
+        const qBlock = document.querySelector('[data-test*="question-"]');
+        if (qBlock && isVis(qBlock)) {
+          console.log("[CareerOS] SR screening questions section found.");
+          return;
+        }
+
+        // Look for progress/next buttons — SR uses various patterns
+        const nextBtn = findVisibleButtonByText(/\b(next|continue|submit|apply|save\s+and\s+continue|review)\b/)
+          || Array.from(queryShadowAll(document, 'button, [role="button"]')).find(el => {
+            if (isPanel(el) || !isVis(el) || el.disabled) return false;
+            const t = (el.textContent || el.getAttribute("aria-label") || "").trim().toLowerCase();
+            return /\b(next|continue|submit|apply)\b/.test(t);
+          });
+
+        // Also look for consent/privacy checkboxes that might gate the next button
+        const uncheckedConsent = document.querySelector(
+          'input[type="checkbox"][data-test*="consent"]:not(:checked), ' +
+          'input[type="checkbox"][data-test*="privacy"]:not(:checked)'
+        );
+        if (uncheckedConsent) {
+          uncheckedConsent.click();
+          await sleep(500);
+        }
+
+        // Also check spl-checkbox in shadow DOM (SR consent checkboxes)
+        const splCheckboxes = queryShadowAll(document, 'input[type="checkbox"]').filter(cb => {
+          const wrapper = cb.closest?.('[data-test*="consent"]') || cb.getRootNode()?.host?.closest?.('[data-test*="consent"]');
+          return wrapper && !cb.checked;
+        });
+        for (const cb of splCheckboxes) { cb.click(); await sleep(300); }
+
+        if (nextBtn) {
+          console.log("[CareerOS] SR advancing form: clicking", nextBtn.textContent?.trim());
+          fireClick(nextBtn);
+          await sleep(2500);
+        } else {
+          // No button found — wait a bit for dynamic rendering
+          await sleep(2000);
+        }
+      }
+      console.log("[CareerOS] SR could not find screening questions section after advancing.");
+    },
+
+    // Read __OC_CONTEXT__ from the page's main world via a script injection
+    _getOcContext() {
+      return new Promise(resolve => {
+        const key = "__co_oc_ctx_" + Date.now();
+        const script = document.createElement("script");
+        script.textContent = `
+          (function(){
+            var ctx = window.__OC_CONTEXT__ || null;
+            document.dispatchEvent(new CustomEvent("${key}", {detail: ctx ? JSON.stringify(ctx) : null}));
+          })();
+        `;
+        document.addEventListener(key, e => resolve(e.detail ? JSON.parse(e.detail) : null), { once: true });
+        document.head.appendChild(script);
+        script.remove();
+        // Timeout fallback
+        setTimeout(() => resolve(null), 2000);
+      });
+    },
+
+    getResumeInput() {
+      // SR new UI: resume dropzone is <spl-dropzone> inside <oc-apply-with-resume>
+      // Its shadow contains: input[type="file"][accept*=".doc"]
+      const resumeZone = document.querySelector("oc-apply-with-resume spl-dropzone");
+      if (resumeZone?.shadowRoot) {
+        const inp = resumeZone.shadowRoot.querySelector('input[type="file"]');
+        if (inp) return inp;
+      }
+      // Fallback: any non-image file input in shadow DOM
+      const allInputs = queryShadowAll(document, 'input[type="file"]').filter(el => !isPanel(el));
+      return allInputs.find(el => {
+        const accept = (el.accept || "").toLowerCase();
+        return !accept.includes("image") && !accept.includes(".jpg") && !accept.includes(".png") && !accept.includes(".gif");
+      }) || null;
+    },
+
+    async getQuestions() {
+      const ctx = await this._getOcContext();
+      const qs = ctx?.screeningConfiguration?.questions || [];
+      const SKIP_TYPES = new Set(["info", "files", "file"]);
+      return qs
+        .filter(q => q.label && !SKIP_TYPES.has((q.type || "").toLowerCase()))
+        .map(q => ({
+          id: q.id,
+          label: q.label,
+          type: q.type, // radio, textarea, select, currency
+          options: (q.fields || []).flatMap(f =>
+            (f.questionsFieldValues || f.values || []).map(v => ({ value: v.fieldValue, label: v.label }))
+          ),
+          fieldName: (q.fields || [])[0]?.name || "value",
+        }));
+    },
+
+    // SR renders each screening question in a section with data-test="question-{id}"
+    // Inputs live inside <spl-input> shadow: input.c-spl-input
+    // Radios live as: input[type="radio"][value="1/0/9"]  (not in shadow)
+    // Textareas: <spl-textarea> shadow or plain <textarea>
+    findElementForQuestion(question) {
+      const type = (question.type || "").toLowerCase();
+      const block = document.querySelector(`[data-test="question-${question.id}"]`);
+      if (!block) return null;
+
+      // Radio / boolean — return the block so fill() can scan for radios
+      if (type === "radio" || type === "boolean") {
+        return block;
+      }
+
+      // Checkbox — return the block for fill() to find checkboxes
+      if (type === "checkbox") {
+        return block;
+      }
+
+      // Select — SR uses <spl-select>, <spl-dropdown>, or custom web components
+      if (type === "select" || type.includes("select")) {
+        const splSelect = block.querySelector("spl-select, spl-dropdown, spl-listbox");
+        if (splSelect) return splSelect;
+        // Fallback: native select
+        const nativeSelect = block.querySelector("select");
+        if (nativeSelect) return nativeSelect;
+        // Try a button or control that acts as a select trigger
+        const trigger = block.querySelector('[role="combobox"], [role="listbox"], button[aria-haspopup]');
+        if (trigger) return trigger;
+        // Last resort: return the block itself so fill() can try to interact with it
+        return block;
+      }
+
+      // Textarea / text / currency — find spl-input or spl-textarea in question block
+      const splInput = block.querySelector("spl-input, spl-textarea");
+      if (splInput?.shadowRoot) {
+        const inp = splInput.shadowRoot.querySelector("input, textarea");
+        if (inp) return inp;
+      }
+      const direct = block.querySelector("input:not([type='hidden']):not([type='radio']):not([type='checkbox']), textarea, select");
+      if (direct) return direct;
+
+      return null;
+    },
+
+    async fill(el, answer, question) {
+      const type = (question?.type || "").toLowerCase();
+      if (!answer) return;
+
+      // Radio / boolean
+      if (type === "radio" || type === "boolean") {
+        const block = el;
+        if (!block) return;
+        const radios = block.querySelectorAll('input[type="radio"]');
+        // Also check shadow DOM for radios
+        const shadowRadios = queryShadowAll(block, 'input[type="radio"]');
+        const allRadios = [...new Set([...radios, ...shadowRadios])];
+        const t = answer.toLowerCase().trim();
+        const target = allRadios.find(r => {
+          const lbl = document.querySelector(`label[for="${r.id}"]`) ||
+                      r.closest("label") ||
+                      r.parentElement?.querySelector("span,label");
+          return (lbl?.textContent || r.value || "").toLowerCase().includes(t);
+        });
+        if (target && !target.checked) target.click();
+        return;
+      }
+
+      // Checkbox — click to check
+      if (type === "checkbox") {
+        const block = el;
+        if (!block) return;
+        const checkboxes = [...block.querySelectorAll('input[type="checkbox"]'), ...queryShadowAll(block, 'input[type="checkbox"]')];
+        for (const cb of checkboxes) {
+          if (!cb.checked) cb.click();
+        }
+        return;
+      }
+
+      // Select — handle spl-select / spl-dropdown / native select / block fallback
+      if (type === "select" || type.includes("select")) {
+        const tagLow = (el.tagName || "").toLowerCase();
+
+        // Native <select>
+        if (tagLow === "select") { selectByText(el, answer); return; }
+
+        // spl-select / spl-dropdown / spl-listbox web components
+        const isSplWidget = tagLow.startsWith("spl-");
+        // Also handle the case where el is the question block
+        const widget = isSplWidget ? el : el.querySelector?.("spl-select, spl-dropdown, spl-listbox");
+        const clickTarget = widget || el.querySelector?.('[role="combobox"], button[aria-haspopup], [class*="control"]') || el;
+
+        fireClick(clickTarget);
+        await sleep(600);
+
+        // Match answer against known options from __OC_CONTEXT__
+        const opts = question.options || [];
+        const ansLower = answer.toLowerCase().trim();
+        const match = opts.find(o => o.label.toLowerCase() === ansLower)
+          || opts.find(o => o.label.toLowerCase().includes(ansLower))
+          || opts.find(o => ansLower.includes(o.label.toLowerCase()));
+        const matchLabel = match ? match.label.toLowerCase() : ansLower;
+
+        // Find and click the rendered option
+        const allOptions = [...document.querySelectorAll('[role="option"]'), ...queryShadowAll(document, '[role="option"]')];
+        let optEl = allOptions.find(o => o.textContent.trim().toLowerCase() === matchLabel);
+        if (!optEl) optEl = allOptions.find(o => o.textContent.trim().toLowerCase().includes(matchLabel));
+        if (!optEl && match) optEl = allOptions.find(o => o.textContent.trim().toLowerCase().includes(ansLower));
+        if (optEl) { fireClick(optEl); await sleep(300); return; }
+
+        // Fallback: try search input inside the widget
+        const searchRoot = widget || el;
+        const searchInput = searchRoot.shadowRoot?.querySelector("input") || searchRoot.querySelector?.("input");
+        if (searchInput) {
+          nativeFill(searchInput, answer);
+          await sleep(600);
+          const firstOpt = document.querySelector('[role="option"]') || searchRoot.shadowRoot?.querySelector('[role="option"]');
+          if (firstOpt) fireClick(firstOpt);
+        }
+        return;
+      }
+
+      // Default: native fill
+      if (el) nativeFill(el, answer);
+    },
+  };
+
+  // Rippling ATS (ats.rippling.com)
+  // Fields: data-testid="field" wrappers with aria-labelledby spans + data-input inputs.
+  // Selects are custom comboboxes with [data-testid="select-controller"] — no native <select>.
+  const RIPPLING = {
+    detect: () => location.hostname.includes("ats.rippling.com"),
+
+    getResumeInput() {
+      return document.querySelector('input[data-testid="input-resume"]') ||
+        document.querySelector('input[type="File"][accept*=".doc"]') || null;
+    },
+
+    getCoverLetterInput() {
+      return document.querySelector('input[data-testid="input-cover_letter"]') || null;
+    },
+
+    getQuestions() {
+      const fields = [];
+      const seen = new Set();
+
+      // Profile fields filled from resume parse — skip from GPT
+      const PROFILE_SKIP = new Set([
+        "first_name", "last_name", "email", "pronouns",
+        "phone_number", "linkedin_link", "website_link",
+        "location", "externalPlaceId", "aiOptOut",
+      ]);
+
+      // SMS opt-in radio — add as a question for GPT
+      const smsGroup = document.querySelector('[data-testid="sms_opt_in"]');
+      if (smsGroup && isVis(smsGroup)) {
+        const options = Array.from(smsGroup.querySelectorAll('input[type="radio"]')).map(r => {
+          const lId = r.getAttribute('aria-labelledby') || "";
+          const lbl = lId ? document.getElementById(lId) : null;
+          return { label: lbl?.textContent?.trim() || r.value, value: r.value };
+        });
+        fields.push({
+          label: "Do you consent to receiving text message updates from the company regarding your job application?",
+          type: "radio_group",
+          radioGroup: smsGroup,
+          options,
+        });
+        seen.add(smsGroup);
+      }
+
+      // 1. Direct text/number/textarea inputs (non-profile, non-hidden)
+      document.querySelectorAll(
+        'input[data-input]:not([type="hidden"]):not([data-input="select-search-input"]), ' +
+        'textarea[id^="field-"]'
+      ).forEach(inp => {
+        if (isPanel(inp) || !isVis(inp) || seen.has(inp)) return;
+        const dataInput = inp.getAttribute("data-input") || "";
+        if (PROFILE_SKIP.has(dataInput)) return;
+        seen.add(inp);
+        // Label: nearest field block → label span, then fall back to surrounding <p>
+        const fieldBlock = inp.closest('[data-testid="field"]');
+        const labelEl = fieldBlock?.querySelector('[id$="-label"]');
+        const container = inp.closest(".marginY--36");
+        const pEl = container?.querySelector("p.css-i4dt0z, p.edalr1o0");
+        const label = pEl?.textContent?.trim() || labelEl?.textContent?.trim() || inp.placeholder || dataInput;
+        if (!label) return;
+        fields.push({ label, type: inp.tagName.toLowerCase(), element: inp });
+      });
+
+      // 2. Custom question selects — [data-testid^="customQuestions."]
+      document.querySelectorAll('[data-testid^="customQuestions."]').forEach(wrapper => {
+        if (isPanel(wrapper) || seen.has(wrapper)) return;
+        seen.add(wrapper);
+        const container = wrapper.closest(".marginY--36");
+        const pEl = container?.querySelector("p.css-i4dt0z, p.edalr1o0");
+        const label = pEl?.textContent?.trim();
+        if (!label) return;
+        const selectController = wrapper.querySelector('[data-testid="select-controller"]');
+        if (!selectController || !isVis(selectController)) return;
+        fields.push({ label, type: "select", selectController, options: [] });
+      });
+
+      // 3. EEO selects — [data-testid^="eeoc."]
+      document.querySelectorAll('[data-testid^="eeoc."]').forEach(wrapper => {
+        if (isPanel(wrapper) || seen.has(wrapper)) return;
+        seen.add(wrapper);
+        const fieldBlock = wrapper.closest('[data-testid="field"]');
+        const labelEl = fieldBlock?.querySelector('[id$="-label"]');
+        const label = labelEl?.textContent?.trim();
+        if (!label) return;
+        const selectController = wrapper.querySelector('[data-testid="select-controller"]');
+        if (!selectController || !isVis(selectController)) return;
+        fields.push({ label, type: "select", selectController, options: [], isEEO: true });
+      });
+
+      return fields;
+    },
+
+    // Open each select dropdown briefly to collect option labels, then close
+    async prepareQuestions(questions) {
+      for (const q of questions) {
+        if (q.type !== "select" || !q.selectController) continue;
+        try {
+          await ripplingOpenDropdown(q.selectController);
+          const opts = await waitForOptions(2000);
+          q.options = opts.map(o => ({ label: o.textContent.trim(), value: o.textContent.trim() })).filter(o => o.label);
+          // Close via Escape
+          document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 27, bubbles: true }));
+          await ripplingWaitClosed(1200);
+        } catch (_) {}
+      }
+    },
+
+    findElementForQuestion(q) { return q.element || q.selectController || q.radioGroup || null; },
+
+    async fill(el, answer, question) {
+      const type = question?.type;
+      if (type === "select") {
+        await ripplingSelectFill(question.selectController, answer);
+      } else if (type === "radio_group") {
+        const t = answer.toLowerCase().trim();
+        const radios = Array.from((question.radioGroup || el).querySelectorAll('input[type="radio"]'));
+        const target = radios.find(r => {
+          const lId = r.getAttribute('aria-labelledby') || "";
+          const lbl = lId ? document.getElementById(lId) : null;
+          return (lbl?.textContent || r.value || "").toLowerCase().includes(t);
+        });
+        if (target && !target.checked) target.click();
+      } else {
+        nativeFill(el, answer);
+      }
+    },
+  };
+
+  // Greenhouse
+  const GREENHOUSE = {
+    detect: () => /greenhouse\.io|job-boards\.greenhouse/.test(location.hostname),
+
+    getResumeInput() {
+      // New Greenhouse: file input inside [data-field="resume"] or near "resume" label
+      const byDataField = document.querySelector('[data-field="resume"] input[type="file"]');
+      if (byDataField && !isPanel(byDataField)) return byDataField;
+      // Legacy: #resume_input, or data-custom-resumeinfo-field
+      const byAttr = document.querySelector('input[data-custom-resumeinfo-field="true"]');
+      if (byAttr && !isPanel(byAttr)) return byAttr;
+      // Fallback: file input near a label containing "resume" or "cv"
+      return Array.from(document.querySelectorAll('input[type="file"]')).find(el => {
+        if (isPanel(el)) return false;
+        const wrapper = el.closest('.field-wrapper, .field, [data-field]');
+        const text = (wrapper?.textContent || "").toLowerCase();
+        return text.includes("resume") || text.includes("cv");
+      }) || null;
+    },
+
+    getCoverLetterInput() {
+      const byDataField = document.querySelector('[data-field="cover_letter"] input[type="file"]');
+      if (byDataField && !isPanel(byDataField)) return byDataField;
+      return Array.from(document.querySelectorAll('input[type="file"]')).find(el => {
+        if (isPanel(el)) return false;
+        const wrapper = el.closest('.field-wrapper, .field, [data-field]');
+        const text = (wrapper?.textContent || "").toLowerCase();
+        return text.includes("cover letter");
+      }) || null;
+    },
+
+    getQuestions() {
+      const fields = [];
+      const seen = new Set();
+      // Greenhouse wraps each field in .field-wrapper (new) or .field (legacy)
+      document.querySelectorAll(".field-wrapper, .field, .form-field, [class*='question']").forEach(block => {
+        if (isPanel(block)) return;
+        const label = block.querySelector("label, legend");
+        if (!label) return;
+        const labelText = label.textContent.trim().replace(/\s*\*\s*$/, "");
+        if (!labelText) return;
+
+        // Skip file inputs (resume/cover letter handled separately)
+        if (block.querySelector('input[type="file"]')) return;
+
+        // 1. Native input/textarea/select
+        let input = block.querySelector('input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="checkbox"]):not([type="radio"]), textarea, select');
+
+        // 2. React-select combobox (Greenhouse uses react-select for dropdowns)
+        let reactSelect = null;
+        if (!input || input.getAttribute("role") === "combobox") {
+          const combo = block.querySelector('[role="combobox"]');
+          if (combo) {
+            reactSelect = combo.closest('.select-shell, [class*="container"]') || combo.parentElement?.parentElement;
+            if (!input) input = combo; // use the combobox input as element
+          }
+        }
+
+        // 3. Checkbox groups
+        const checkboxes = block.querySelectorAll('input[type="checkbox"]');
+        if (checkboxes.length && !input) {
+          // Treat as a multi-option question
+          const opts = Array.from(checkboxes).map(cb => {
+            const cbLabel = block.querySelector(`label[for="${cb.id}"]`);
+            return { label: cbLabel?.textContent?.trim() || cb.value, value: cb.value, el: cb };
+          });
+          if (seen.has(labelText)) return;
+          seen.add(labelText);
+          fields.push({ label: labelText, element: checkboxes[0], type: "checkbox_group", checkboxes: opts, options: opts });
+          return;
+        }
+
+        // 4. Radio groups
+        const radios = block.querySelectorAll('input[type="radio"]');
+        if (radios.length) {
+          const opts = Array.from(radios).map(r => {
+            const rLabel = block.querySelector(`label[for="${r.id}"]`);
+            return { label: rLabel?.textContent?.trim() || r.value, value: r.value, el: r };
+          });
+          if (seen.has(labelText)) return;
+          seen.add(labelText);
+          fields.push({ label: labelText, element: radios[0], type: "radio_group", radios: opts, options: opts });
+          return;
+        }
+
+        if (!input || !isVis(input)) return;
+        if (seen.has(input)) return;
+        seen.add(input);
+
+        const q = { label: labelText, element: input, type: input.tagName.toLowerCase() };
+        if (reactSelect) {
+          q.type = "react_select";
+          q.reactSelectContainer = reactSelect;
+        }
+        fields.push(q);
+      });
+      return fields;
+    },
+
+    findElementForQuestion(q) { return q.element || null; },
+
+    async fill(el, answer, question) {
+      if (!answer) return;
+      const qType = question?.type || "";
+
+      // React-select dropdown
+      if (qType === "react_select") {
+        const container = question.reactSelectContainer;
+        if (!container) { nativeFill(el, answer); return; }
+        // Click to open the dropdown
+        const control = container.querySelector('[class*="control"]') || container;
+        fireClick(control);
+        await sleep(400);
+        // Type to filter
+        const comboInput = container.querySelector('input[role="combobox"]') || el;
+        comboInput.focus();
+        nativeFill(comboInput, answer);
+        await sleep(600);
+        // Pick the first matching option
+        const options = document.querySelectorAll('[class*="option"], [role="option"]');
+        const ansLower = answer.toLowerCase();
+        let matched = Array.from(options).find(o => o.textContent.trim().toLowerCase() === ansLower);
+        if (!matched) matched = Array.from(options).find(o => o.textContent.trim().toLowerCase().includes(ansLower));
+        if (!matched && options.length) matched = options[0];
+        if (matched) {
+          fireClick(matched);
+          await sleep(300);
+        }
+        return;
+      }
+
+      // Radio group
+      if (qType === "radio_group" && question.radios) {
+        const ansLower = answer.toLowerCase();
+        let match = question.radios.find(r => r.label.toLowerCase() === ansLower);
+        if (!match) match = question.radios.find(r => r.label.toLowerCase().includes(ansLower));
+        if (!match) match = question.radios.find(r => ansLower.includes(r.label.toLowerCase()));
+        if (match) { match.el.click(); return; }
+      }
+
+      // Checkbox group
+      if (qType === "checkbox_group" && question.checkboxes) {
+        const ansLower = answer.toLowerCase();
+        for (const cb of question.checkboxes) {
+          if (ansLower.includes(cb.label.toLowerCase()) || cb.label.toLowerCase().includes(ansLower) || ansLower === "yes" || ansLower === "true") {
+            if (!cb.el.checked) cb.el.click();
+          }
+        }
+        return;
+      }
+
+      // Native select
+      if (el.tagName === "SELECT") {
+        selectByText(el, answer);
+        return;
+      }
+
+      // Default: native fill for input/textarea
+      nativeFill(el, answer);
+    },
+  };
+
+  // Workday
+  const WORKDAY = {
+    detect: () => /myworkdayjobs\.com|workday\.com/.test(location.hostname),
+
+    getResumeInput() {
+      return Array.from(document.querySelectorAll('input[type="file"]')).find(el => {
+        const section = el.closest("[data-automation-id],[aria-label]");
+        const text = (section?.getAttribute("aria-label") || section?.textContent || "").toLowerCase();
+        return text.includes("resume") || text.includes("cv");
+      }) || null;
+    },
+
+    getQuestions() {
+      const fields = [];
+      document.querySelectorAll("[data-automation-id*='formField'],[data-automation-id*='questionField']").forEach(block => {
+        if (isPanel(block)) return;
+        const label = block.querySelector("label,[data-automation-id*='label']");
+        const input = block.querySelector("input:not([type='hidden']):not([type='file']), textarea, select");
+        if (!label || !input || !isVis(input)) return;
+        fields.push({ label: label.textContent.trim(), element: input, type: input.tagName.toLowerCase() });
+      });
+      return fields;
+    },
+
+    findElementForQuestion(q) { return q.element || null; },
+    async fill(el, answer) { nativeFill(el, answer); },
+  };
+
+  // Workable (apply.workable.com)
+  // Form rendered inside a <dialog> modal. Uses data-ui attributes.
+  const WORKABLE = {
+    detect: () => /workable\.com/.test(location.hostname),
+
+    _dialog() {
+      return document.querySelector('dialog[open], dialog[data-ui="modal"]') || document;
+    },
+
+    getResumeInput() {
+      const root = this._dialog();
+      return root.querySelector('input[data-ui="resume"][type="file"]')
+        || root.querySelector('input[type="file"][accept*=".pdf"]')
+        || null;
+    },
+
+    getCoverLetterInput() {
+      const root = this._dialog();
+      return root.querySelector('input[data-ui="cover-letter"][type="file"]') || null;
+    },
+
+    getQuestions() {
+      const root = this._dialog();
+      const fields = [];
+      const seen = new Set();
+
+      // Workable wraps each field in a <section> or <div> with a <label>
+      root.querySelectorAll("section, .form-group, [data-ui]").forEach(block => {
+        if (isPanel(block)) return;
+        // Skip file upload and resume/cover-letter sections
+        if (block.querySelector('input[type="file"]')) return;
+        const dataUi = block.getAttribute("data-ui") || "";
+        if (dataUi === "resume" || dataUi === "cover-letter" || dataUi === "modal") return;
+
+        const label = block.querySelector("label, legend");
+        if (!label) return;
+        const labelText = label.textContent.trim().replace(/\s*\*\s*$/, "").replace(/\s+/g, " ");
+        if (!labelText || labelText.length < 2) return;
+
+        // Find input element
+        let input = block.querySelector('input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="checkbox"]):not([type="radio"]), textarea, select');
+
+        // React-select (phone country, etc.)
+        let reactSelect = null;
+        if (!input) {
+          const combo = block.querySelector('[role="combobox"]');
+          if (combo) {
+            reactSelect = combo.closest('[class*="container"]') || combo.parentElement?.parentElement;
+            input = combo;
+          }
+        }
+
+        // Radio group
+        const radios = block.querySelectorAll('input[type="radio"]');
+        if (radios.length) {
+          const opts = Array.from(radios).map(r => {
+            const rLabel = block.querySelector(`label[for="${r.id}"]`) || r.closest("label") || r.parentElement;
+            return { label: rLabel?.textContent?.trim() || r.value, value: r.value, el: r };
+          });
+          if (seen.has(labelText)) return;
+          seen.add(labelText);
+          fields.push({ label: labelText, element: radios[0], type: "radio_group", radios: opts, options: opts });
+          return;
+        }
+
+        // Checkbox group
+        const checkboxes = block.querySelectorAll('input[type="checkbox"]');
+        if (checkboxes.length && !input) {
+          const opts = Array.from(checkboxes).map(cb => {
+            const cbLabel = block.querySelector(`label[for="${cb.id}"]`);
+            return { label: cbLabel?.textContent?.trim() || cb.value, value: cb.value, el: cb };
+          });
+          if (seen.has(labelText)) return;
+          seen.add(labelText);
+          fields.push({ label: labelText, element: checkboxes[0], type: "checkbox_group", checkboxes: opts, options: opts });
+          return;
+        }
+
+        if (!input) return;
+        if (seen.has(input)) return;
+        seen.add(input);
+
+        const q = { label: labelText, element: input, type: input.tagName.toLowerCase() };
+        if (reactSelect) {
+          q.type = "react_select";
+          q.reactSelectContainer = reactSelect;
+        }
+        // Collect options for native select
+        if (input.tagName === "SELECT") {
+          q.options = Array.from(input.options).filter(o => o.value).map(o => ({ label: o.textContent.trim(), value: o.value }));
+        }
+        fields.push(q);
+      });
+
+      // Fallback: grab any visible text/textarea inputs not yet captured (flat forms)
+      const selector = 'input[type="text"],input[type="email"],input[type="tel"],input[type="url"],input[type="number"],textarea';
+      root.querySelectorAll(selector).forEach(el => {
+        if (!isVis(el) || isPanel(el) || seen.has(el)) return;
+        if ((el.value || "").trim()) return; // already filled
+        let lbl = "";
+        if (el.id) {
+          const l = root.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+          if (l) lbl = l.textContent.trim();
+        }
+        if (!lbl) lbl = el.closest("label")?.textContent?.trim() || "";
+        if (!lbl) lbl = el.getAttribute("aria-label") || el.placeholder || el.name || "";
+        if (!lbl) return;
+        seen.add(el);
+        fields.push({ label: lbl, element: el, type: el.tagName.toLowerCase() });
+      });
+
+      return fields;
+    },
+
+    findElementForQuestion(q) { return q.element || null; },
+
+    async fill(el, answer, question) {
+      if (!answer) return;
+      const qType = question?.type || "";
+
+      if (qType === "react_select") {
+        const container = question.reactSelectContainer;
+        if (!container) { nativeFill(el, answer); return; }
+        const control = container.querySelector('[class*="control"]') || container;
+        fireClick(control);
+        await sleep(400);
+        const comboInput = container.querySelector('input[role="combobox"]') || el;
+        comboInput.focus();
+        nativeFill(comboInput, answer);
+        await sleep(600);
+        const options = document.querySelectorAll('[class*="option"], [role="option"]');
+        const ansLower = answer.toLowerCase();
+        let matched = Array.from(options).find(o => o.textContent.trim().toLowerCase() === ansLower)
+          || Array.from(options).find(o => o.textContent.trim().toLowerCase().includes(ansLower));
+        if (!matched && options.length) matched = options[0];
+        if (matched) { fireClick(matched); await sleep(300); }
+        return;
+      }
+
+      if (qType === "radio_group" && question.radios) {
+        const ansLower = answer.toLowerCase();
+        const match = question.radios.find(r => r.label.toLowerCase() === ansLower)
+          || question.radios.find(r => r.label.toLowerCase().includes(ansLower))
+          || question.radios.find(r => ansLower.includes(r.label.toLowerCase()));
+        if (match) { match.el.click(); return; }
+      }
+
+      if (qType === "checkbox_group" && question.checkboxes) {
+        const ansLower = answer.toLowerCase();
+        for (const cb of question.checkboxes) {
+          if (ansLower.includes(cb.label.toLowerCase()) || ansLower === "yes" || ansLower === "true") {
+            if (!cb.el.checked) cb.el.click();
+          }
+        }
+        return;
+      }
+
+      if (el.tagName === "SELECT") { selectByText(el, answer); return; }
+
+      nativeFill(el, answer);
+    },
+  };
+
+  // Generic fallback
+  const GENERIC = {
+    detect: () => true,
+
+    getResumeInput() {
+      const all = Array.from(document.querySelectorAll('input[type="file"]')).filter(el => !isPanel(el) && isVis(el));
+      // Skip image/avatar inputs
+      return all.find(el => {
+        const accept = (el.accept || "").toLowerCase();
+        const name = (el.name || el.id || "").toLowerCase();
+        const nearLabel = (document.querySelector(`label[for="${el.id}"]`)?.textContent || "").toLowerCase();
+        const isImage = accept.includes("image") || accept.includes(".jpg") || accept.includes(".png") || name.includes("photo") || name.includes("avatar") || nearLabel.includes("photo") || nearLabel.includes("avatar");
+        return !isImage;
+      }) || null;
+    },
+
+    getQuestions() {
+      const fields = [];
+      const seen = new Set();
+      const selector = 'input[type="text"],input[type="email"],input[type="tel"],input[type="url"],input[type="number"],textarea,select';
+      document.querySelectorAll(selector).forEach(el => {
+        if (!isVis(el) || isPanel(el) || seen.has(el)) return;
+        if ((el.value || "").trim()) return;
+        // Get label
+        let label = "";
+        if (el.id) {
+          const lbl = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+          if (lbl) label = lbl.textContent.trim();
+        }
+        if (!label) label = el.closest("label")?.textContent?.trim() || "";
+        if (!label) label = el.getAttribute("aria-label") || "";
+        if (!label) {
+          const lblId = el.getAttribute("aria-labelledby");
+          if (lblId) label = document.getElementById(lblId)?.textContent?.trim() || "";
+        }
+        if (!label) label = el.placeholder || el.name || "";
+        if (!label) return;
+        if (isLikelyNonApplicationField(el, label)) return;
+        seen.add(el);
+        fields.push({ label, element: el, type: el.tagName.toLowerCase() });
+      });
+      return fields;
+    },
+
+    findElementForQuestion(q) { return q.element || null; },
+    async fill(el, answer) { nativeFill(el, answer); },
+  };
+
+  // ADP WorkforceNow — Angular SPA, form rendered inside same-origin iframe
+  // Inputs use: input[id], select[id], textarea; labels use <label for="...">
+  // Resume upload: input[type="file"] near text "resume"/"cv"
+  const ADP = {
+    detect: () => location.hostname.includes("workforcenow.adp.com"),
+
+    _root() {
+      // ADP renders the apply form inside an iframe — find it and use its contentDocument
+      // If we're already inside the iframe (content script runs in all_frames), use document directly
+      if (location.href.includes("recruitment.html")) return document;
+      const iframe = document.querySelector('iframe[src*="recruitment"], iframe[src*="adp"]');
+      return iframe?.contentDocument || document;
+    },
+
+    getResumeInput() {
+      const root = this._root();
+      const all = Array.from(root.querySelectorAll('input[type="file"]')).filter(el => !isPanel(el));
+      return all.find(el => {
+        const lbl = el.id ? root.querySelector(`label[for="${el.id}"]`) : null;
+        const nearby = (lbl?.textContent || el.name || el.closest("div,section")?.textContent || "").toLowerCase();
+        const accept = (el.accept || "").toLowerCase();
+        return (nearby.includes("resume") || nearby.includes("cv")) &&
+               !accept.includes("image");
+      }) || all.find(el => {
+        const accept = (el.accept || "").toLowerCase();
+        return !accept.includes("image") && !accept.includes(".jpg") && !accept.includes(".png");
+      }) || null;
+    },
+
+    getQuestions() {
+      const root = this._root();
+      const fields = [];
+      const seen = new Set();
+
+      // ADP renders fields as: <div class="..."><label for="X">Label</label><input id="X"...></div>
+      root.querySelectorAll("label[for]").forEach(lbl => {
+        if (isPanel(lbl)) return;
+        const id = lbl.getAttribute("for");
+        const el = id ? root.getElementById(id) : null;
+        if (!el || seen.has(el)) return;
+        const tag = el.tagName.toLowerCase();
+        if (!["input", "select", "textarea"].includes(tag)) return;
+        if (el.type === "hidden" || el.type === "file" || el.type === "submit" || el.type === "button") return;
+        if (!isVis(el)) return;
+        seen.add(el);
+        const options = tag === "select"
+          ? Array.from(el.options).filter(o => o.value).map(o => ({ label: o.text.trim(), value: o.value }))
+          : [];
+        fields.push({ label: lbl.textContent.trim(), element: el, type: tag, options });
+      });
+
+      // Also catch aria-label inputs not covered by <label for>
+      root.querySelectorAll("input[aria-label], textarea[aria-label]").forEach(el => {
+        if (isPanel(el) || seen.has(el) || !isVis(el)) return;
+        if (el.type === "hidden" || el.type === "file") return;
+        seen.add(el);
+        fields.push({ label: el.getAttribute("aria-label").trim(), element: el, type: el.tagName.toLowerCase(), options: [] });
+      });
+
+      return fields;
+    },
+
+    findElementForQuestion(q) { return q.element || null; },
+
+    async fill(el, answer, question) {
+      if (question?.type === "select") {
+        selectByText(el, answer);
+      } else {
+        nativeFill(el, answer);
+      }
+    },
+  };
+
+  function detectHandler() {
+    if (ADP.detect()) return ADP;
+    if (RIPPLING.detect()) return RIPPLING;
+    if (SMARTRECRUITERS.detect()) return SMARTRECRUITERS;
+    if (GREENHOUSE.detect()) return GREENHOUSE;
+    if (WORKDAY.detect()) return WORKDAY;
+    if (WORKABLE.detect()) return WORKABLE;
+    return GENERIC;
+  }
+
+  // ---- Main entry ----
+
+  const stored = await chrome.storage.local.get(["automation", "automationJobContext"]);
+  if (!stored.automation?.active) return;
+  const ctx = stored.automationJobContext;
+  if (!ctx) return;
+
+  const SKIP = ["lever.co", "linkedin.com"];
+  if (SKIP.some(d => location.hostname.includes(d))) {
+    await sendNext({ status: "skipped", reason: location.hostname });
+    return;
+  }
+
+  await new Promise(r => { if (document.readyState === "complete") return r(); window.addEventListener("load", r, { once: true }); });
+  // ADP loads an Angular SPA that takes several seconds to render
+  const baseWait = location.hostname.includes("adp.com") ? 5000 : 2000;
+  await sleep(baseWait);
+  if (location.hostname.includes("adp.com")) {
+    await waitForFormSignals(15000);
+  }
+
+  await clickGateIfNeeded();
+  await sleep(1000);
+  await clickConsentAndContinueGates();
+
+  if (isLikelyLoginPage()) {
+    if (location.hostname.includes("adp.com")) {
+      console.log("[CareerOS] ADP login page detected; leaving tab open and skipping job.");
+      await sendNext({ status: "skipped", reason: "adp login required" });
+      return;
+    }
+    console.log("[CareerOS] Login page detected; waiting for manual login.");
+    const loginDone = await waitForLoginCompletion();
+    if (!loginDone) {
+      await sendNext({ status: "manual", reason: "login required" });
+      return;
+    }
+    await sleep(1500);
+  }
+
+  const handler = detectHandler();
+  const isGenericHandler = handler === GENERIC;
+  const handlerName = handler === ADP ? "ADP" : handler === RIPPLING ? "Rippling" : handler === SMARTRECRUITERS ? "SmartRecruiters" : handler === GREENHOUSE ? "Greenhouse" : handler === WORKDAY ? "Workday" : handler === WORKABLE ? "Workable" : "Generic";
+  console.log("[CareerOS] Autofill handler:", handlerName);
+
+  // 1. Resume file — only into the resume input, never the cover letter input
+  if (ctx.resumeFileInfo) {
+    const resumeInput = handler.getResumeInput();
+    // Exclude Rippling's cover_letter input from resume injection
+    const coverLetterInput = handler.getCoverLetterInput ? handler.getCoverLetterInput() : null;
+    const safeResumeInput = (resumeInput && resumeInput !== coverLetterInput) ? resumeInput : null;
+    console.log("[CareerOS] Resume input found:", !!safeResumeInput);
+    if (safeResumeInput) await injectFileIntoInput(safeResumeInput, ctx.resumeFileInfo).catch(() => {});
+  }
+
+  // 1b. Cover letter file — generate DOCX from cover letter text and inject
+  if (handler.getCoverLetterInput) {
+    const clInput = handler.getCoverLetterInput();
+    if (clInput && ctx.coverLetter) {
+      const clText = String(ctx.coverLetter).trim();
+      if (clText) {
+        const resp = await chrome.runtime.sendMessage({ type: "CO_COVER_LETTER_DOCX_B64", payload: { text: clText } }).catch(() => null);
+        if (resp?.ok) {
+          const raw = atob(resp.b64);
+          const bytes = new Uint8Array(raw.length);
+          for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+          const mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+          const file = new File([bytes], "cover_letter.docx", { type: mime });
+          const dt = new DataTransfer();
+          dt.items.add(file);
+          const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "files").set;
+          setter.call(clInput, dt.files);
+          clInput.dispatchEvent(new Event("input",  { bubbles: true }));
+          clInput.dispatchEvent(new Event("change", { bubbles: true }));
+          console.log("[CareerOS] Cover letter DOCX injected.");
+        }
+      }
+    }
+  }
+
+  // 1c. SmartRecruiters: advance through multi-step form to reach screening questions
+  if (handler.advanceToScreeningQuestions) {
+    await handler.advanceToScreeningQuestions();
+  }
+
+  // 2. Collect questions
+  const questions = await Promise.resolve(handler.getQuestions());
+  const externalApplicationUrl = isGenericHandler ? findExternalApplicationUrl() : "";
+  // Let handler fetch options (e.g. Rippling opens each select briefly)
+  if (handler.prepareQuestions) await handler.prepareQuestions(questions);
+  console.log("[CareerOS] Questions found:", questions.length, questions.map(q => `${q.label} [${q.options?.length || 0} opts]`));
+
+  if (externalApplicationUrl) {
+    console.log("[CareerOS] Generic page points to an external application URL; leaving tab open and continuing automation:", externalApplicationUrl);
+    await sendNext({ status: "manual", reason: "external application link" });
+    return;
+  }
+
+  if (!questions.length) {
+    if (isGenericHandler) {
+      console.log("[CareerOS] Generic/custom site with no detected questions; leaving tab open and continuing automation.");
+      await sendNext({ status: "manual", reason: "custom site" });
+      return;
+    }
+    // Register submit listener and exit — user fills manually
+    document.addEventListener("submit", () => {
+      sleep(1500).then(() => sendNext({ status: "applied" }));
+    }, { once: true, capture: true });
+    return;
+  }
+
+  // 3. Build GPT prompt — include options for select/radio so GPT picks the right value
+  const questionLines = questions.map((q, i) => {
+    let line = `Q${i + 1}: ${q.label}`;
+    if (q.options?.length) {
+      line += `\n  Options: ${q.options.map(o => o.label).join(" | ")}`;
+    }
+    return line;
+  }).join("\n");
+
+  const qaPrompt =
+    `Fill these job application form fields for the ${ctx.position} position at ${ctx.company}.\n` +
+    `Use my personal info and experience from our resume conversation.\n` +
+    `For each question, answer on its own line as: A1: answer\n` +
+    `For Yes/No questions, answer Yes or No.\n` +
+    `For select/radio, choose the closest matching option text exactly as written.\n\n` +
+    questionLines;
+
+  const gptText = await askGpt(ctx, qaPrompt, "qa");
+  console.log("[CareerOS] GPT QA response:", gptText?.slice(0, 300));
+
+  if (gptText) {
+    const answers = parseQaResponse(gptText, questions.length);
+    for (let i = 0; i < questions.length; i++) {
+      const q = questions[i];
+      const answer = answers[i];
+      if (!answer) continue;
+      let el = handler.findElementForQuestion(q);
+      // Retry once: scroll down and wait for lazy-rendered elements (SR multi-step)
+      if (!el) {
+        window.scrollBy(0, 400);
+        await sleep(800);
+        el = handler.findElementForQuestion(q);
+      }
+      // BOOLEAN type: try clickRadioByText by fieldName as fallback when no element found
+      if (!el) {
+        const type = (q.type || "").toUpperCase();
+        if ((type === "BOOLEAN" || type === "RADIO") && q.fieldName) {
+          clickRadioByText(q.fieldName, answer);
+        }
+        continue;
+      }
+      await handler.fill(el, answer, q).catch((e) => console.warn("[CareerOS] Fill error:", q.label, e));
+    }
+  }
+
+  // 4. Auto-submit
+  await sleep(800);
+
+  // Find the submit/apply button — must be enabled
+  const action = findPrimaryActionButton();
+  const submitBtn = action.button;
+
+  // Detect captcha/blocker — if a turnstile/recaptcha/hcaptcha is present and visible, skip auto-submit
+  const hasCaptcha = !!(
+    document.querySelector("#turnstile-container, .cf-turnstile, .h-captcha, .g-recaptcha, iframe[src*='captcha']")
+  ) && isVis(document.querySelector("#turnstile-container, .cf-turnstile, .h-captcha, .g-recaptcha, iframe[src*='captcha']"));
+
+  if (hasCaptcha) {
+    console.log("[CareerOS] Captcha detected — leaving tab for manual completion.");
+    await sendNext({ status: "manual", reason: "captcha" });
+    return;
+  }
+
+  if (!submitBtn) {
+    console.log("[CareerOS] No enabled submit button found — leaving tab for manual completion.");
+    await sendNext({ status: "manual", reason: "no action button" });
+    return;
+  }
+
+  console.log(`[CareerOS] Auto-${action.kind === "submit" ? "submitting" : "advancing"}:`, submitBtn.textContent.trim());
+
+  // Listen for form submit event or URL change as success signal
+  let submitted = false;
+  const submitListener = () => { submitted = true; };
+  document.addEventListener("submit", submitListener, { once: true, capture: true });
+
+  const urlBefore = location.href;
+  fireClick(submitBtn);
+
+  // Wait up to 15s for actual success: navigation, submit event, or confirmation element
+  // Do NOT treat button-disabled as success — React disables it immediately on click
+  // Minimum 2s before checking — React router may do minor URL updates on click
+  await sleep(2000);
+
+  const deadline = Date.now() + 13000;
+  let successDetected = false;
+  let advancedStep = false;
+
+  while (Date.now() < deadline) {
+    await sleep(400);
+
+    // Hard success signals
+    if (submitted) { successDetected = true; break; }
+    if (location.href !== urlBefore) { successDetected = true; break; }
+    if (action.kind === "progress" && await waitForFormSignals(250)) {
+      advancedStep = true;
+      break;
+    }
+
+    const successEl = document.querySelector(
+      '[data-testid*="success"], [data-testid*="confirmation"], [data-testid*="thank"],' +
+      ' [class*="successMessage"], [class*="confirmationPage"]'
+    );
+    if (successEl && isVis(successEl)) { successDetected = true; break; }
+
+    // Captcha that appeared after click — leave for manual
+    const captchaAfter = document.querySelector("#turnstile-container, .cf-turnstile, .h-captcha, .g-recaptcha");
+    if (captchaAfter && isVis(captchaAfter)) {
+      document.removeEventListener("submit", submitListener, { capture: true });
+      console.log("[CareerOS] Captcha appeared after submit — leaving tab.");
+      await sendNext({ status: "manual", reason: "captcha after submit" });
+      return;
+    }
+
+    // Button re-enabled means submission was rejected (validation error) — stop waiting
+    const btnStillPresent = document.contains(submitBtn);
+    if (btnStillPresent && !submitBtn.disabled && submitBtn.getAttribute("data-disabled") !== "true") {
+      console.log("[CareerOS] Submit button re-enabled — likely a validation error, leaving tab.");
+      break;
+    }
+  }
+
+  document.removeEventListener("submit", submitListener, { capture: true });
+
+  if (successDetected) {
+    console.log("[CareerOS] Submitted successfully.");
+    await sleep(1500);
+    await sendNext({ status: "applied" });
+  } else if (advancedStep) {
+    console.log("[CareerOS] Advanced to next application step â€” leaving tab for continued automation/manual review.");
+    await sendNext({ status: "manual", reason: "advanced to next step" });
+  } else {
+    console.log("[CareerOS] Could not confirm submission — leaving tab for manual completion.");
+    await sendNext({ status: "manual", reason: "submit unconfirmed" });
+  }
+
+})().catch(e => console.error("[CareerOS] Autofill error:", e));
