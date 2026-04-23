@@ -264,6 +264,74 @@ function waitForDownloadComplete(downloadId, timeoutMs = 120000) {
   });
 }
 
+// Mutex for the "activate tab + type prompt + click send" step. Without
+// this, multiple GPT tabs opened in rapid succession would race for focus
+// and only the last-activated tab could reliably type into the composer.
+// The lock is short-lived (held only while typing + sending, ~1-2s per
+// tab) so generations still stream in parallel once released.
+let _coTypingHolder = null; // tabId currently holding the lock
+const _coTypingQueue = []; // [{ tabId, respond }]
+let _coTypingTimer = null;
+
+function _coTypingGrantNext() {
+  if (_coTypingHolder != null) return;
+  const next = _coTypingQueue.shift();
+  if (!next) return;
+  _coTypingHolder = next.tabId;
+  clearTimeout(_coTypingTimer);
+  _coTypingTimer = setTimeout(() => {
+    if (_coTypingHolder === next.tabId) {
+      _coTypingHolder = null;
+      _coTypingGrantNext();
+    }
+  }, 20000);
+  try {
+    next.respond({ ok: true });
+  } catch (_) {}
+}
+
+function _coTypingRelease(tabId) {
+  if (_coTypingHolder === tabId) {
+    _coTypingHolder = null;
+    clearTimeout(_coTypingTimer);
+    _coTypingGrantNext();
+  }
+  // Also drop any queued request for this tab (if the tab was closed).
+  for (let i = _coTypingQueue.length - 1; i >= 0; i--) {
+    if (_coTypingQueue[i].tabId === tabId) _coTypingQueue.splice(i, 1);
+  }
+}
+
+// When a GPT tab is closed before it produces a result, notify the origin
+// tab so its button state can be reset, and clean up the orphan job entry.
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  _coTypingRelease(tabId);
+  try {
+    const existing = await chrome.storage.local.get(["gptJobs"]);
+    const jobs =
+      existing.gptJobs && typeof existing.gptJobs === "object"
+        ? existing.gptJobs
+        : {};
+    const key = String(tabId);
+    const job = jobs[key];
+    if (!job) return;
+
+    if (job.originTabId != null) {
+      chrome.tabs
+        .sendMessage(job.originTabId, {
+          type: "CO_GPT_RESULT",
+          text: null,
+          error: "GPT tab was closed before completion.",
+          mode: job.mode || "resume",
+        })
+        .catch(() => {});
+    }
+
+    delete jobs[key];
+    await chrome.storage.local.set({ gptJobs: jobs });
+  } catch (_) {}
+});
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     try {
@@ -431,7 +499,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
 
       // 5) Open ChatGPT tab for GPT-assisted generation
-      // payload: { company, position, jd }
+      // Jobs are keyed per-GPT-tab so two origin tabs can run independently.
+      // payload: { company, position, jd, gptUrl, prompt, mode }
       if (msg.type === "CO_GPT_OPEN") {
         const { company, position, jd, gptUrl, prompt, mode } = msg.payload || {};
         const originTabId = sender.tab?.id;
@@ -446,36 +515,153 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return;
         }
 
-        await chrome.storage.local.set({
-          gptJob: { company, position, jd: jd || "", originTabId, consumed: false, prompt: prompt || null, mode: mode || "resume" },
+        // Strip any trailing /c/<conversationId> so each parallel generation
+        // opens in its own fresh conversation. Reusing the same conversation
+        // across tabs causes ChatGPT to sync messages between them, so the
+        // bridges end up capturing each other's responses.
+        const freshGptUrl = String(gptUrl).replace(
+          /\/c\/[^/?#]+(?=[/?#]|$)/,
+          "",
+        );
+
+        const newTab = await new Promise((resolve) => {
+          chrome.tabs.create({ url: freshGptUrl }, (tab) => resolve(tab));
         });
 
-        chrome.tabs.create({ url: gptUrl });
+        if (!newTab?.id) {
+          sendResponse({ ok: false, error: "Failed to open ChatGPT tab" });
+          return;
+        }
+
+        const existing = await chrome.storage.local.get(["gptJobs"]);
+        const jobs =
+          existing.gptJobs && typeof existing.gptJobs === "object"
+            ? existing.gptJobs
+            : {};
+        jobs[String(newTab.id)] = {
+          company,
+          position,
+          jd: jd || "",
+          originTabId,
+          consumed: false,
+          prompt: prompt || null,
+          mode: mode || "resume",
+          createdAt: Date.now(),
+        };
+        await chrome.storage.local.set({ gptJobs: jobs });
 
         sendResponse({ ok: true });
         return;
       }
 
-      // 6) GPT response from chatgpt-bridge.js — relay to origin tab and optionally close GPT tab
+      // 5c) Bridge asks to activate (focus) its own tab. Needed because
+      // when the user fires several GPT Gens in quick succession, each
+      // newly-created tab steals focus from the previous one, and
+      // ChatGPT's composer requires a focused document for execCommand
+      // + keyboard events to insert the prompt.
+      if (msg.type === "CO_ACTIVATE_SELF") {
+        const tabId = sender.tab?.id;
+        if (tabId != null) {
+          try {
+            await chrome.tabs.update(tabId, { active: true });
+          } catch (_) {}
+        }
+        sendResponse({ ok: true });
+        return;
+      }
+
+      // Acquire the typing lock. If no one holds it, grant immediately.
+      // Otherwise queue and respond when our turn comes up.
+      if (msg.type === "CO_GPT_ACQUIRE_TYPING") {
+        const tabId = sender.tab?.id;
+        if (tabId == null) {
+          sendResponse({ ok: false });
+          return;
+        }
+        if (_coTypingHolder == null) {
+          _coTypingHolder = tabId;
+          clearTimeout(_coTypingTimer);
+          _coTypingTimer = setTimeout(() => {
+            if (_coTypingHolder === tabId) {
+              _coTypingHolder = null;
+              _coTypingGrantNext();
+            }
+          }, 20000);
+          sendResponse({ ok: true });
+          return;
+        }
+        _coTypingQueue.push({ tabId, respond: sendResponse });
+        // sendResponse will be invoked later when our turn arrives.
+        return;
+      }
+
+      if (msg.type === "CO_GPT_RELEASE_TYPING") {
+        const tabId = sender.tab?.id;
+        if (tabId != null) _coTypingRelease(tabId);
+        sendResponse({ ok: true });
+        return;
+      }
+
+      // 5b) Bridge asks for the job assigned to its tab
+      if (msg.type === "CO_GPT_GET_JOB") {
+        const tabId = sender.tab?.id;
+        if (tabId == null) {
+          sendResponse({ ok: false, job: null });
+          return;
+        }
+        const existing = await chrome.storage.local.get(["gptJobs"]);
+        const jobs =
+          existing.gptJobs && typeof existing.gptJobs === "object"
+            ? existing.gptJobs
+            : {};
+        const key = String(tabId);
+        const job = jobs[key];
+        if (!job || job.consumed) {
+          sendResponse({ ok: true, job: null });
+          return;
+        }
+        jobs[key] = { ...job, consumed: true };
+        await chrome.storage.local.set({ gptJobs: jobs });
+        sendResponse({ ok: true, job });
+        return;
+      }
+
+      // 6) GPT response from chatgpt-bridge.js — route back to the origin tab
+      // that launched this specific GPT tab, based on sender.tab.id.
       // payload: { text } on success, { error } on failure
       if (msg.type === "CO_GPT_RESULT") {
-        const stored = await chrome.storage.local.get(["gptJob", "close_gpt_tab"]);
-        const originTabId = stored.gptJob?.originTabId;
+        const tabId = sender.tab?.id;
+        if (tabId != null) _coTypingRelease(tabId);
+        const stored = await chrome.storage.local.get([
+          "gptJobs",
+          "close_gpt_tab",
+        ]);
+        const jobs =
+          stored.gptJobs && typeof stored.gptJobs === "object"
+            ? stored.gptJobs
+            : {};
+        const key = tabId != null ? String(tabId) : null;
+        const job = key ? jobs[key] : null;
 
-        if (originTabId) {
+        if (job?.originTabId != null) {
           chrome.tabs
-            .sendMessage(originTabId, {
+            .sendMessage(job.originTabId, {
               type: "CO_GPT_RESULT",
               text: msg.payload?.text || null,
               error: msg.payload?.error || null,
-              mode: stored.gptJob?.mode || "resume",
+              mode: job.mode || "resume",
             })
             .catch(() => {});
         }
 
+        if (key && jobs[key]) {
+          delete jobs[key];
+          await chrome.storage.local.set({ gptJobs: jobs });
+        }
+
         // Close the ChatGPT tab only if the user opted in
-        if (stored.close_gpt_tab && sender.tab?.id) {
-          chrome.tabs.remove(sender.tab.id).catch(() => {});
+        if (stored.close_gpt_tab && tabId != null) {
+          chrome.tabs.remove(tabId).catch(() => {});
         }
 
         sendResponse({ ok: true });

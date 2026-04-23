@@ -2,6 +2,62 @@
 // CareerOS content script with login/logout + user picker.
 const BACKEND_DEFAULT = "https://career-os.onrender.com";
 
+// Extract a valid JSON value from arbitrary GPT output. GPT sometimes wraps
+// JSON in prose ("Here's the JSON: {...}"), fences it with ```json ... ```,
+// or appends trailing commentary. Returns the parsed value or null.
+function extractJsonFromText(text) {
+  if (typeof text !== "string") return null;
+  const tryParse = (s) => {
+    try {
+      return JSON.parse(s);
+    } catch (_) {
+      return null;
+    }
+  };
+
+  const trimmed = text.trim();
+  const direct = tryParse(trimmed);
+  if (direct !== null) return direct;
+
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) {
+    const parsed = tryParse(fence[1].trim());
+    if (parsed !== null) return parsed;
+  }
+
+  // Scan for the first balanced {...} or [...] block, respecting strings.
+  const scan = (openChar, closeChar) => {
+    for (let start = 0; start < text.length; start++) {
+      if (text[start] !== openChar) continue;
+      let depth = 0;
+      let inStr = false;
+      let esc = false;
+      for (let i = start; i < text.length; i++) {
+        const c = text[i];
+        if (inStr) {
+          if (esc) esc = false;
+          else if (c === "\\") esc = true;
+          else if (c === '"') inStr = false;
+        } else if (c === '"') {
+          inStr = true;
+        } else if (c === openChar) {
+          depth++;
+        } else if (c === closeChar) {
+          depth--;
+          if (depth === 0) {
+            const parsed = tryParse(text.slice(start, i + 1));
+            if (parsed !== null) return parsed;
+            break;
+          }
+        }
+      }
+    }
+    return null;
+  };
+
+  return scan("{", "}") ?? scan("[", "]");
+}
+
 let CO_USER_MAP = new Map(); // user_id -> { id, name }
 let CO_ALL_USERS = []; // [{id, name}]
 let CO_EXISTS_CACHE = new Map(); // user_id -> { exists, created_at, created_by, raw }
@@ -417,6 +473,11 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
 
 // ---- main panel ----
 (() => {
+  // The content script is injected into every frame (all_frames: true in
+  // the manifest). Without this guard, pages that embed iframes end up
+  // rendering the launch icon multiple times — once per frame.
+  if (window.top !== window.self) return;
+
   const PANEL_ID = "careeros-panel-root";
   const STYLE_ID = "careeros-panel-style";
 
@@ -1638,13 +1699,18 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         return false;
       }
 
-      els.resume_json.value = text;
+      // Extract a valid JSON block from the raw GPT output, which may contain
+      // extra prose, markdown fences, or trailing commentary.
+      const parsed = extractJsonFromText(text);
+      const cleanJson = parsed ? JSON.stringify(parsed, null, 2) : text;
+      els.resume_json.value = cleanJson;
 
-      // Parse GPT JSON and check blocked flag
-      let parsed = null;
-      try {
-        parsed = JSON.parse(text);
-      } catch (_) {}
+      if (!parsed) {
+        setStatus(
+          "⚠️ Could not parse GPT output as JSON. Review the textarea and retry.",
+        );
+        return false;
+      }
 
       if (parsed?.blocked) {
         const reason = parsed.block_reason || "No reason provided.";
@@ -1668,7 +1734,7 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
         company,
         position,
         jdText,
-        resumeJsonText: text,
+        resumeJsonText: cleanJson,
         wantCoverLetter: false,
         sourceSite,
         resumeFormat,
