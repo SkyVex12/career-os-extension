@@ -1830,10 +1830,25 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
   async function sendNext(payload) {
     if (__co_next_sent) return;
     __co_next_sent = true;
-    try {
-      await chrome.runtime.sendMessage({ type: "AUTOMATION_NEXT", payload });
-    } catch (_) {}
+    // Retry up to 3 times — Manifest V3 service worker may be dormant
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await chrome.runtime.sendMessage({ type: "AUTOMATION_NEXT", payload });
+        return;
+      } catch (_) {
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
   }
+
+  // SAFETY TIMEOUT: ensure automation ALWAYS advances, even if the code stalls
+  // or encounters an unhandled edge case (iframe-only forms, unexpected page state, etc.)
+  const __co_safety_timer = setTimeout(() => {
+    if (!__co_next_sent) {
+      console.warn("[CareerOS] Safety timeout — forcing AUTOMATION_NEXT (manual)");
+      sendNext({ status: "manual", reason: "safety timeout" });
+    }
+  }, 90_000); // 90 seconds max per external ATS page
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
   function isPanel(el) { return !!el.closest("#careeros-panel-root"); }
@@ -2631,7 +2646,10 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
     detect: () => /greenhouse\.io|job-boards\.greenhouse/.test(location.hostname),
 
     getResumeInput() {
-      // New Greenhouse: file input inside [data-field="resume"] or near "resume" label
+      // New Greenhouse (2025+): file input with id="resume"
+      const byId = document.querySelector('input[type="file"]#resume');
+      if (byId && !isPanel(byId)) return byId;
+      // Greenhouse with data-field wrapper
       const byDataField = document.querySelector('[data-field="resume"] input[type="file"]');
       if (byDataField && !isPanel(byDataField)) return byDataField;
       // Legacy: #resume_input, or data-custom-resumeinfo-field
@@ -2640,20 +2658,24 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       // Fallback: file input near a label containing "resume" or "cv"
       return Array.from(document.querySelectorAll('input[type="file"]')).find(el => {
         if (isPanel(el)) return false;
+        // Check wrapper text OR the input's own id/name
         const wrapper = el.closest('.field-wrapper, .field, [data-field]');
-        const text = (wrapper?.textContent || "").toLowerCase();
+        const text = (wrapper?.textContent || el.id || el.name || "").toLowerCase();
         return text.includes("resume") || text.includes("cv");
       }) || null;
     },
 
     getCoverLetterInput() {
+      // New Greenhouse (2025+): file input with id="cover_letter"
+      const byId = document.querySelector('input[type="file"]#cover_letter');
+      if (byId && !isPanel(byId)) return byId;
       const byDataField = document.querySelector('[data-field="cover_letter"] input[type="file"]');
       if (byDataField && !isPanel(byDataField)) return byDataField;
       return Array.from(document.querySelectorAll('input[type="file"]')).find(el => {
         if (isPanel(el)) return false;
         const wrapper = el.closest('.field-wrapper, .field, [data-field]');
-        const text = (wrapper?.textContent || "").toLowerCase();
-        return text.includes("cover letter");
+        const text = (wrapper?.textContent || el.id || el.name || "").toLowerCase();
+        return text.includes("cover letter") || text.includes("cover_letter");
       }) || null;
     },
 
@@ -3002,18 +3024,37 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
       document.querySelectorAll(selector).forEach(el => {
         if (!isVis(el) || isPanel(el) || seen.has(el)) return;
         if ((el.value || "").trim()) return;
-        // Get label
+        // Get label — try multiple strategies (standard, Zoho, Lever, etc.)
         let label = "";
+        // 1. Standard: label[for]
         if (el.id) {
           const lbl = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
           if (lbl) label = lbl.textContent.trim();
         }
+        // 2. Wrapping <label>
         if (!label) label = el.closest("label")?.textContent?.trim() || "";
+        // 3. aria-label / aria-labelledby
         if (!label) label = el.getAttribute("aria-label") || "";
         if (!label) {
           const lblId = el.getAttribute("aria-labelledby");
           if (lblId) label = document.getElementById(lblId)?.textContent?.trim() || "";
         }
+        // 4. Walk up through ancestor containers to find a label
+        //    Handles: Zoho (.crc-form-row > label), Lever (.application-field > label),
+        //    and other ATS with row-based layouts.
+        //    Try multiple ancestor levels since the label may be in a grandparent row.
+        if (!label) {
+          let ancestor = el.parentElement;
+          for (let depth = 0; depth < 8 && ancestor && !label; depth++) {
+            const rowLabel = ancestor.querySelector(':scope > label, :scope > .label');
+            if (rowLabel) {
+              label = rowLabel.textContent.trim();
+              break;
+            }
+            ancestor = ancestor.parentElement;
+          }
+        }
+        // 5. placeholder / name fallback
         if (!label) label = el.placeholder || el.name || "";
         if (!label) return;
         if (isLikelyNonApplicationField(el, label)) return;
@@ -3117,9 +3158,17 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
   const ctx = stored.automationJobContext;
   if (!ctx) return;
 
-  const SKIP = ["lever.co", "linkedin.com"];
+  const SKIP = ["linkedin.com", "angel.co", "wellfound.com"];
   if (SKIP.some(d => location.hostname.includes(d))) {
     await sendNext({ status: "skipped", reason: location.hostname });
+    return;
+  }
+
+  // Workday: complex multi-step SPA that requires account creation/login.
+  // Skip immediately and move to next job instead of stalling.
+  if (/myworkdayjobs\.com|workday\.com/.test(location.hostname)) {
+    console.log("[CareerOS] Workday detected — skipping (requires account creation).");
+    await sendNext({ status: "skipped", reason: "Workday (requires login)" });
     return;
   }
 
@@ -3134,6 +3183,23 @@ async function updateExistsForSelected(root, cardEl, jobUrl) {
   await clickGateIfNeeded();
   await sleep(1000);
   await clickConsentAndContinueGates();
+
+  // Detect iframe-only application forms (e.g., Comeet, Breezy, JazzHR)
+  // If clicking the gate button loaded a cross-origin iframe but the top frame
+  // still has no form fields, the GENERIC handler would find nothing to fill.
+  // Skip early instead of stalling.
+  if (!hasVisibleApplicationSignals()) {
+    const formIframes = Array.from(document.querySelectorAll("iframe")).filter(f => {
+      const src = (f.src || "").toLowerCase();
+      return (src.includes("apply") || src.includes("job") || src.includes("career") || src.includes("form")) &&
+             f.offsetWidth > 100 && f.offsetHeight > 100;
+    });
+    if (formIframes.length) {
+      console.log("[CareerOS] Application form is inside an iframe — cannot autofill cross-origin. Skipping.");
+      await sendNext({ status: "manual", reason: "iframe application form" });
+      return;
+    }
+  }
 
   if (isLikelyLoginPage()) {
     if (location.hostname.includes("adp.com")) {

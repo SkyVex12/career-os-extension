@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CareerOS Capture",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Auto-open CareerOS panel on job pages; resilient to SPA re-renders.",
   "permissions": [
     "downloads",
@@ -18,8 +18,13 @@
     "https://chatgpt.com/*",
     "https://remotive.com/*",
     "https://ats.rippling.com/*",
+    "https://*.smartrecruiters.com/*",
     "https://workforcenow.adp.com/*",
-    "https://*.workable.com/*"
+    "https://*.workable.com/*",
+    "https://*.myworkdayjobs.com/*",
+    "https://jobs.lever.co/*",
+    "https://*.lever.co/*",
+    "https://*.zohorecruit.com/*"
   ],
   "background": {
     "service_worker": "background.js"

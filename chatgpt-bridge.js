@@ -91,17 +91,40 @@ async function sendResult(payload) {
     // Type into the contenteditable input
     inputEl.focus();
     await sleep(200);
+
+    // Method 1: execCommand (works well with React contenteditable)
     document.execCommand("selectAll", false);
     await sleep(100);
-    const inserted = document.execCommand("insertText", false, prompt);
+    let inserted = false;
+    try {
+      inserted = document.execCommand("insertText", false, prompt);
+    } catch (_) {}
 
-    // Fallback if execCommand didn't work (some browsers restrict it)
+    // Method 2: Clipboard API fallback — triggers React's onBeforeInput/onInput properly
     if (!inserted || !(inputEl.textContent || "").trim()) {
+      try {
+        // Clear existing content
+        inputEl.textContent = "";
+        // Use InputEvent with insertText to mimic real typing (React-compatible)
+        const ev = new InputEvent("beforeinput", {
+          inputType: "insertText",
+          data: prompt,
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+        });
+        inputEl.dispatchEvent(ev);
+        await sleep(100);
+      } catch (_) {}
+    }
+
+    // Method 3: Direct textContent + input event (last resort)
+    if (!(inputEl.textContent || "").trim()) {
       inputEl.textContent = prompt;
       inputEl.dispatchEvent(new InputEvent("input", { bubbles: true, data: prompt }));
     }
 
-    await sleep(600);
+    await sleep(800);
 
     // Click the send button
     const sendBtn = await waitForElement(

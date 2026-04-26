@@ -59,8 +59,10 @@
   // ---- Page type detection ----
 
   function isListPage() {
-    // /remote-jobs  or  /remote-jobs/category  (1 or 2 segments)
+    // Root "/" now shows the full job list (Remotive redirects /remote-jobs → /)
+    // Also match /remote-jobs and /remote-jobs/category (1 or 2 segments)
     const segs = location.pathname.replace(/\/$/, "").split("/").filter(Boolean);
+    if (segs.length === 0) return true; // root page IS the list page
     return segs[0] === "remote-jobs" && segs.length <= 2;
   }
 
@@ -79,13 +81,14 @@
   function parseRelativeDate(text) {
     const t = (text || "").toLowerCase().trim();
 
-    // Remotive uses "-1d ago", "-2d ago", "-3h ago" format
-    const remotiveMatch = t.match(/^-(\d+)([dhm])\s*ago$/);
+    // Remotive uses "-1d ago", "-2d ago", "-3h ago", "2wks ago" format
+    const remotiveMatch = t.match(/^-?(\d+)\s*([dhm]|wks?|weeks?|days?|hrs?|hours?|mins?)\s*ago$/);
     if (remotiveMatch) {
       const n = parseInt(remotiveMatch[1], 10);
-      const unit = remotiveMatch[2];
+      const unit = remotiveMatch[2][0]; // first char: d, h, m, w
       const d = new Date();
-      if (unit === 'd') d.setDate(d.getDate() - n);
+      if (unit === 'w') d.setDate(d.getDate() - n * 7);
+      else if (unit === 'd') d.setDate(d.getDate() - n);
       else if (unit === 'h') d.setHours(d.getHours() - n);
       else if (unit === 'm') d.setMinutes(d.getMinutes() - n);
       return d;
@@ -124,10 +127,10 @@
     return null;
   }
 
-  function isAfterYesterday(date) {
+  function isWithinDays(date, days) {
     if (!date) return false;
     const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - 1);
+    cutoff.setDate(cutoff.getDate() - (days || 1));
     cutoff.setHours(0, 0, 0, 0);
     return date >= cutoff;
   }
@@ -251,8 +254,8 @@
     }) || null;
   }
 
-  async function loadAllJobsAfterYesterday(onProgress) {
-    const MAX_CLICKS = 30;
+  async function loadAllJobsWithinDays(days, onProgress) {
+    const MAX_CLICKS = 50;
     let clicks = 0;
 
     while (clicks < MAX_CLICKS) {
@@ -269,8 +272,8 @@
         }
       }
 
-      // If we can parse dates and the oldest is before yesterday — stop clicking
-      if (datesFound > 0 && oldestDate && !isAfterYesterday(oldestDate)) break;
+      // If we can parse dates and the oldest is before our cutoff — stop clicking
+      if (datesFound > 0 && oldestDate && !isWithinDays(oldestDate, days)) break;
 
       const btn = findLoadMoreButton();
       if (!btn) break;
@@ -295,7 +298,15 @@
     panel.innerHTML = `
       <div class="co-r-card">
         <div class="co-r-title">🤖 CareerOS Automation</div>
-        <div class="co-r-status" id="co-r-status-text">Click Start to apply to all recent jobs automatically.</div>
+        <div class="co-r-status" id="co-r-status-text">Enter the number of days and click Start.</div>
+        <div style="margin-top:8px;display:flex;align-items:center;gap:8px;">
+          <label for="co-r-days-input" style="font-weight:700;font-size:12px;white-space:nowrap;">Days back:</label>
+          <input id="co-r-days-input" type="number" min="1" max="30" value="1" style="
+            width:60px;padding:6px 8px;border:1px solid #d1d5db;border-radius:8px;
+            font-size:13px;font-weight:700;text-align:center;outline:none;
+          " />
+          <span style="font-size:11px;color:#6b7280;">Jobs from the last N days</span>
+        </div>
         <div class="co-r-btns">
           <button class="co-r-btn co-r-btn-green" id="co-r-start-btn">▶ Start Automation</button>
           <button class="co-r-btn co-r-btn-red" id="co-r-stop-btn" style="display:none;">■ Stop</button>
@@ -333,10 +344,15 @@
 
     startBtn.addEventListener("click", async () => {
       startBtn.disabled = true;
-      setStatus("Loading all jobs posted after yesterday...");
+      const daysInput = document.getElementById("co-r-days-input");
+      const days = Math.max(1, Math.min(30, parseInt(daysInput?.value, 10) || 1));
+      // Save preference
+      chrome.storage.local.set({ co_automation_days: days }).catch(() => {});
+
+      setStatus(`Loading all jobs from the last ${days} day${days > 1 ? "s" : ""}...`);
 
       try {
-        await loadAllJobsAfterYesterday(setStatus);
+        await loadAllJobsWithinDays(days, setStatus);
 
         const cards = scrapeJobCards();
         const qualifying = [];
@@ -344,7 +360,7 @@
         for (const card of cards) {
           const date = getJobDateFromCard(card);
           // Include if date unknown (err on inclusion) or within range
-          if (date && !isAfterYesterday(date)) continue;
+          if (date && !isWithinDays(date, days)) continue;
           const url = getJobUrlFromCard(card);
           const title = getJobTitleFromCard(card);
           if (url && !qualifying.find((q) => q.url === url)) {
@@ -353,7 +369,7 @@
         }
 
         if (!qualifying.length) {
-          setStatus("No jobs found posted after yesterday.");
+          setStatus(`No jobs found in the last ${days} day${days > 1 ? "s" : ""}.`);
           startBtn.disabled = false;
           return;
         }
@@ -383,6 +399,14 @@
       setStatus("Automation stopped.");
       showStopped();
     });
+
+    const daysInput = document.getElementById("co-r-days-input");
+
+    // Restore saved days preference
+    chrome.storage.local.get(["co_automation_days"]).then(stored => {
+      const saved = stored.co_automation_days;
+      if (saved && daysInput) daysInput.value = String(saved);
+    }).catch(() => {});
 
     // Resume display if automation already running
     chrome.runtime.sendMessage({ type: "AUTOMATION_STATUS" }).then((resp) => {
@@ -781,18 +805,52 @@
     upsertOverlay("⚙ CareerOS Automation", "Finding apply link...");
     await sleep(500);
 
-    // Collect all a.remotive-btn-chocolate links for debugging
-    const allApplyLinks = Array.from(document.querySelectorAll("a.remotive-btn-chocolate[href]"))
-      .map(a => a.href);
-    console.log("[CareerOS] Step 5: all remotive-btn-chocolate links:", allApplyLinks);
+    // Helper: check if a URL points to an external (non-remotive) site
+    // IMPORTANT: check hostname only, NOT full URL — UTM params like
+    // ?utm_source=remotive.com would cause false negatives on href.includes()
+    function isExternalHref(href) {
+      try { return !new URL(href).hostname.includes("remotive.com"); }
+      catch (_) { return false; }
+    }
 
-    const externalUrl = allApplyLinks.find(h => !h.includes("remotive.com")) || null;
-    console.log("[CareerOS] Step 5: chosen external URL:", externalUrl);
+    // 1. Primary: a.remotive-btn-chocolate with external href
+    const allChocolateLinks = Array.from(document.querySelectorAll("a.remotive-btn-chocolate[href]"));
+    let externalAnchor = allChocolateLinks.find(a => isExternalHref(a.href));
+    let externalUrl = externalAnchor?.href || null;
+
+    // 2. Fallback: any <a> with "apply" text linking externally
+    if (!externalUrl) {
+      const applyAnchors = Array.from(document.querySelectorAll("a[href]")).filter(a => {
+        const t = (a.textContent || "").trim().toLowerCase();
+        return (t.includes("apply") || t.includes("submit") || a.className.includes("apply")) &&
+               isExternalHref(a.href);
+      });
+      externalUrl = applyAnchors[0]?.href || null;
+    }
+
+    // 3. Fallback: external link in the JD body (e.g., Google Forms, Typeform, etc.)
+    if (!externalUrl) {
+      const jdContainer = document.querySelector("div.left") || document.querySelector("div.tw-mt-8");
+      if (jdContainer) {
+        const jdLinks = Array.from(jdContainer.querySelectorAll("a[href]")).filter(a => {
+          try {
+            const u = new URL(a.href);
+            return u.hostname && !u.hostname.includes("remotive.com") &&
+                   !["linkedin.com", "twitter.com", "facebook.com", "instagram.com", "reddit.com", "t.me"].some(s => u.hostname.includes(s));
+          } catch (_) { return false; }
+        });
+        // Prefer links with "apply" text, then just take the first external link
+        const applyLink = jdLinks.find(a => (a.textContent || "").toLowerCase().includes("apply"));
+        externalUrl = applyLink?.href || jdLinks[0]?.href || null;
+      }
+    }
+
+    console.log("[CareerOS] Step 5: chocolate links:", allChocolateLinks.length, "| external URL:", externalUrl);
 
     if (!externalUrl) {
-      upsertOverlay("⚙ CareerOS Automation", "❌ External apply link not found.");
-      await sleep(3000);
-      await chrome.runtime.sendMessage({ type: "AUTOMATION_NEXT", payload: { status: "error", reason: "Apply link not found" } });
+      upsertOverlay("⚙ CareerOS Automation", "⏭ No external apply link — skipping.");
+      await sleep(2000);
+      await chrome.runtime.sendMessage({ type: "AUTOMATION_NEXT", payload: { status: "skipped", reason: "No external apply link" } });
       return;
     }
 
